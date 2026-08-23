@@ -1,0 +1,1415 @@
+import { eq, and, or, isNull, sql } from 'drizzle-orm';
+import {
+  tasks,
+  calls,
+  callAttempts,
+  businessCandidates,
+  authorizationRequests,
+  enqueueJob,
+} from '@dial/database';
+import {
+  getCallFamily,
+  describeCalleError,
+  dialTaskSchema,
+  type CallFamilyId,
+  type DialTask,
+  type CallDisposition,
+  type TaskResult,
+} from '@dial/schemas';
+import {
+  rankCandidates,
+  selectCallTargets,
+  compareOutcomes,
+  canPlaceCalls,
+  canPerformSideEffect,
+  isUnsupportedSensitivity,
+  isValidE164,
+  isBlockedNumber,
+  shouldAskClarification,
+} from '@dial/domain';
+import { buildCallBrief, callIdempotencyKey, ProviderError, isTerminal } from '@dial/calle';
+import {
+  isTooCoarseToSearch,
+  isCountryLevel,
+  cityFromTimezone,
+  type GeocodeResult,
+} from '@dial/search';
+import { logger, incrementCounter, observe } from '@dial/observability';
+import type { OrchestratorContext } from './context.js';
+import {
+  setState,
+  addEvent,
+  getTask,
+  saveCandidates,
+  listCandidates,
+  listCalls,
+  markSelected,
+  getUserPolicy,
+  getSettings,
+  newId,
+  notify,
+  audit,
+  reserveCallBudget,
+  rowToCandidate,
+} from './repo.js';
+import { InterpreterUnavailableError } from '@dial/ai';
+
+/**
+ * The task pipeline. Each step is a durable job: it reads the task's current
+ * state from the database, does one thing, records the outcome, and schedules
+ * whatever comes next. Nothing is held in memory between steps, so a worker
+ * restart resumes rather than loses -- and because dispatch is guarded by a
+ * unique idempotency key, a redelivered job cannot dial twice.
+ */
+
+/* ------------------------------------------------------------- interpret */
+
+export async function handleInterpret(
+  ctx: OrchestratorContext,
+  payload: { taskId: string },
+): Promise<void> {
+  const task = await getTask(ctx.db, payload.taskId);
+  // `interpreting` is a valid entry state as well as `created`: it means a
+  // previous attempt began and did not finish, which is exactly the case a
+  // queue retry is for. Re-entering is safe because this handler only reads the
+  // instruction and overwrites its own output.
+  if (!task || (task.state !== 'created' && task.state !== 'interpreting')) return;
+
+  if (task.state === 'created') await setState(ctx, task.id, 'interpreting');
+
+  if (!ctx.interpreter) {
+    await failTask(
+      ctx,
+      task.id,
+      'llm_not_configured',
+      new InterpreterUnavailableError().message,
+    );
+    return;
+  }
+
+  const settings = await getSettings(ctx.db, task.userId);
+  const now = new Date();
+
+  let interpreted: { task: DialTask; callFamily: CallFamilyId };
+  try {
+    interpreted = await ctx.interpreter.interpret({
+      instruction: task.instruction,
+      locationLabel: task.locationLabel ?? settings.defaultLocation?.label ?? null,
+      today: now.toISOString().slice(0, 10),
+      currentTime: now.toTimeString().slice(0, 5),
+      knownPreferences: {},
+    });
+  } catch (error) {
+    // A busy or rate-limited model is temporary. Throwing hands the job back to
+    // the queue, which retries with exponential backoff — the user waits rather
+    // than being told their request failed. Only an exhausted job becomes a
+    // terminal failure, and the runner handles that.
+    if ((error as { retryable?: boolean }).retryable) {
+      await addEvent(
+        ctx,
+        task.id,
+        'interpreting',
+        'Still working — Dial is waiting on a busy service and will retry shortly.',
+      );
+      incrementCounter('task.interpret_retry');
+      throw error;
+    }
+    // Permanent. The message is one of ours; provider text never reaches here.
+    await failTask(ctx, task.id, 'interpretation_failed', (error as Error).message);
+    return;
+  }
+
+  const dialTask = interpreted.task;
+
+  // Safety gates, evaluated before anything is stored as actionable.
+  if (dialTask.isEmergency) {
+    await failTask(
+      ctx,
+      task.id,
+      'emergency',
+      'This looks like an emergency. Please contact your local emergency services directly — Dial must not sit between you and them.',
+    );
+    return;
+  }
+  if (isUnsupportedSensitivity(dialTask)) {
+    await failTask(
+      ctx,
+      task.id,
+      'unsupported',
+      'Dial will not handle this kind of request by automated phone call.',
+    );
+    return;
+  }
+  if (dialTask.authorizationRequirement === 'not_supported') {
+    await failTask(
+      ctx,
+      task.id,
+      'unsupported',
+      'This request needs to be handled by you directly rather than by an automated call.',
+    );
+    return;
+  }
+
+  // Answers to the intake questions become task constraints, so they reach both
+  // the ranking layer and the call brief.
+  const answers = (task.clarifyingAnswers ?? {}) as Record<string, string>;
+  for (const [key, value] of Object.entries(answers)) {
+    if (typeof value === 'string' && value.trim()) {
+      dialTask.constraints.additional[key] = value.trim();
+    }
+  }
+
+  // An answer naming a place has to actually move the search, not just sit in
+  // the constraints. Asking "which city in Saudi Arabia?", being told "Riyadh",
+  // and then still searching the whole country is the obvious failure here.
+  const answeredPlace = placeFromAnswers(answers);
+  if (answeredPlace) {
+    const original = dialTask.location?.raw ?? null;
+    // Keep the broader place for context: "Riyadh" alone is ambiguous
+    // worldwide, "Riyadh, Saudi Arabia" is not.
+    const combined =
+      original && !answeredPlace.toLowerCase().includes(original.toLowerCase())
+        ? `${answeredPlace}, ${original}`
+        : answeredPlace;
+
+    dialTask.location = {
+      raw: combined,
+      latitude: null,
+      longitude: null,
+      label: null,
+      radiusKm: dialTask.location?.radiusKm ?? null,
+    };
+    logger.info('intake answer narrowed the search location', { taskId: task.id, to: combined });
+  }
+
+  await ctx.db
+    .update(tasks)
+    .set({
+      interpreted: dialTask,
+      callFamily: interpreted.callFamily,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(eq(tasks.id, task.id));
+
+  // The intake step: a few targeted questions asked once, before any work.
+  // Distinct from the model interrupting mid-pipeline, which is suppressed
+  // below -- these are generated deliberately, capped, and skippable.
+  if (!task.intakeDone && settings.askClarifyingQuestions && ctx.questionGenerator) {
+    const questions = await ctx.questionGenerator
+      .generate({ instruction: task.instruction, task: dialTask })
+      .catch(() => []);
+
+    // Intake is an enhancement. If it produced nothing, carry on rather than
+    // blocking the task on a step that is meant to help.
+    if (questions.length > 0) {
+      await ctx.db
+        .update(tasks)
+        .set({ clarifyingQuestions: questions, intakeDone: true })
+        .where(eq(tasks.id, task.id));
+
+      await setState(
+        ctx,
+        task.id,
+        'needs_user_input',
+        `A few quick questions so Dial asks the right things (${questions.length})`,
+      );
+      return;
+    }
+    await ctx.db.update(tasks).set({ intakeDone: true }).where(eq(tasks.id, task.id));
+  }
+
+  // Only interrupt when the task genuinely cannot proceed. The model's opinion
+  // that a question would be nice is not sufficient -- see shouldAskClarification.
+  if (dialTask.clarificationNeeded && shouldAskClarification(dialTask)) {
+    await setState(ctx, task.id, 'needs_user_input', dialTask.clarificationNeeded, {
+      clarificationQuestion: dialTask.clarificationNeeded,
+    });
+    return;
+  }
+  if (dialTask.clarificationNeeded) {
+    logger.info('ignoring an unnecessary clarification request', {
+      taskId: task.id,
+      question: dialTask.clarificationNeeded,
+    });
+  }
+
+  await enqueueJob(ctx.db, 'task.research', { taskId: task.id }, { dedupeKey: `research:${task.id}`, maxAttempts: 8 });
+}
+
+/**
+ * Turns a country-sized match into somewhere Dial can actually search.
+ *
+ * Three sources, cheapest first, because the first two need no second service
+ * and the public Overpass instances rate-limit aggressively:
+ *
+ *  1. The capital, when OpenStreetMap tags one on the country (`capital_city`).
+ *     Already in the geocode response, so it is free.
+ *  2. The city the IANA timezone is named after ('Asia/Riyadh' -> Riyadh).
+ *     Also already in the response, and present for most countries that have a
+ *     single zone.
+ *  3. The largest city by population inside the country's bounding box, via
+ *     Overpass. Slower and less reliable, but it is the only one of the three
+ *     that works for a country the geocoder has neither tag for -- Finland and
+ *     Morocco both have neither.
+ *
+ * Returns null when none can answer, which is the only case where the user has
+ * to be asked.
+ */
+async function resolveSearchableCity(
+  ctx: OrchestratorContext,
+  countryGeo: GeocodeResult,
+  countryName: string,
+): Promise<{ name: string; latitude: number; longitude: number } | null> {
+  const hints = [countryGeo.capitalCity, cityFromTimezone(countryGeo.timezone)].filter(
+    (h): h is string => Boolean(h && h.trim()),
+  );
+
+  for (const hinted of hints) {
+    // Geocode the hint rather than trusting it as a place: this confirms the
+    // city exists and is in the right country.
+    const city = await ctx.discovery.geocode(`${hinted}, ${countryName}`).catch(() => null);
+    if (!city) continue;
+    // `isCountryLevel`, not `isTooCoarseToSearch`: the coordinate here is the
+    // city's own place node, so the width of the administrative area around it
+    // is beside the point. See the note on that function.
+    if (isCountryLevel(city)) continue;
+    if (countryGeo.countryCode && city.countryCode !== countryGeo.countryCode) continue;
+    // Show the geocoder's name for it, not the tag's: OSM stores `capital_city`
+    // in the local script, so Egypt's arrives as "القاهرة" while the geocoded
+    // label -- requested in English -- says Cairo.
+    const name = city.label.split(',')[0]?.trim() || hinted;
+    return { name, latitude: city.latitude, longitude: city.longitude };
+  }
+
+  const largest = await ctx.discovery
+    .findMajorCity(countryGeo.countryCode, countryGeo.boundingBox ?? null)
+    .catch(() => null);
+  return largest
+    ? { name: largest.name, latitude: largest.latitude, longitude: largest.longitude }
+    : null;
+}
+
+/**
+ * Is this "location" actually a reference to the user's own position rather
+ * than a place that can be looked up?
+ *
+ * Matters because the two need opposite handling: a real place name that fails
+ * to geocode is a transient service problem worth retrying, while "near me"
+ * with no coordinates on file can only be resolved by asking.
+ */
+export function isRelativeLocation(raw: string): boolean {
+  return /^(near ?me|nearby|near by|close by|around here|my area|my location|here|local|locally|in my area)$/i.test(
+    raw.trim(),
+  );
+}
+
+/**
+ * Picks the answer that names a place, if the intake asked for one.
+ *
+ * Matched on the question id rather than the text, because the id is the
+ * snake_case key the generator chose and is stable across languages. Exported
+ * for testing.
+ */
+export function placeFromAnswers(answers: Record<string, string>): string | null {
+  const looksLikePlace = /(^|_)(city|town|area|district|neighbourhood|neighborhood|location|region|emirate|governorate|postcode|zip)(_|$)/;
+
+  for (const [key, value] of Object.entries(answers)) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (!trimmed) continue;
+    // A non-answer must not be geocoded — "anywhere" is not a place.
+    if (/^(any|anywhere|no preference|doesn'?t matter|not sure|n\/a)$/i.test(trimmed)) continue;
+    if (looksLikePlace.test(key.toLowerCase())) return trimmed;
+  }
+  return null;
+}
+
+/**
+ * Below this many callable businesses, the first search is not worth acting on
+ * and it is cheaper to widen than to ring the one shop that listed a number.
+ */
+const MIN_CALLABLE_BEFORE_WIDENING = 3;
+
+/* -------------------------------------------------------------- research */
+
+export async function handleResearch(
+  ctx: OrchestratorContext,
+  payload: { taskId: string },
+): Promise<void> {
+  const task = await getTask(ctx.db, payload.taskId);
+  if (!task) return;
+  const parsed = dialTaskSchema.safeParse(task.interpreted);
+  if (!parsed.success) return;
+  const dialTask = parsed.data;
+
+  await setState(ctx, task.id, 'researching');
+
+  // Resolve location: explicit task coords -> user default -> geocoded text.
+  const settings = await getSettings(ctx.db, task.userId);
+  let latitude = task.latitude ?? settings.defaultLocation?.latitude ?? null;
+  let longitude = task.longitude ?? settings.defaultLocation?.longitude ?? null;
+  let locationLabel = task.locationLabel ?? settings.defaultLocation?.label ?? null;
+  let countryCode: string | null = null;
+
+  // "near me" is not a place, it is a reference to coordinates we do not have.
+  // Geocoding it would fail forever, so it counts as no location at all and the
+  // user is asked — unlike a real place name, which is retried.
+  const rawPlace = dialTask.location?.raw ?? null;
+  const requestedPlace = rawPlace && !isRelativeLocation(rawPlace) ? rawPlace : null;
+
+  if ((latitude === null || longitude === null) && requestedPlace) {
+    let geo;
+    try {
+      geo = await ctx.discovery.geocode(requestedPlace);
+    } catch (error) {
+      // The geocoder being down is not the same as the user not telling us
+      // where. Retry rather than asking them to repeat themselves.
+      logger.warn('geocoding threw', {
+        taskId: task.id,
+        place: requestedPlace,
+        error: (error as Error).message,
+      });
+      geo = null;
+    }
+
+    if (!geo) {
+      // Same reasoning: they said "Dubai". Asking "where should Dial search?"
+      // in response to a transient lookup failure is the worst possible reply.
+      await addEvent(
+        ctx,
+        task.id,
+        'researching',
+        `Still finding ${requestedPlace} on the map — Dial will try again shortly.`,
+      );
+      incrementCounter('task.geocode_retry');
+      const error = new Error('Geocoding unavailable') as Error & { retryable: boolean };
+      error.retryable = true;
+      throw error;
+    }
+
+    // A country or region is too big to search around a centroid, but that is
+    // no reason to stop and ask. Start from its largest city and say so.
+    if (isTooCoarseToSearch(geo)) {
+      const placeName = geo.label.split(',')[0]?.trim() || requestedPlace;
+      const resolved = await resolveSearchableCity(ctx, geo, placeName);
+
+      if (resolved) {
+        latitude = resolved.latitude;
+        longitude = resolved.longitude;
+        locationLabel = `${resolved.name}, ${placeName}`;
+        countryCode = geo.countryCode;
+        await addEvent(
+          ctx,
+          task.id,
+          'researching',
+          `${placeName} is a whole country — Dial searched ${resolved.name}. Name a different city if you would rather.`,
+        );
+      } else {
+        // Could not resolve a city, so there is genuinely nothing to search
+        // around. This is the one case where asking is the only option.
+        await setState(
+          ctx,
+          task.id,
+          'needs_user_input',
+          `${placeName} covers too large an area for Dial to search.`,
+          {
+            latitude: null,
+            longitude: null,
+            clarificationQuestion: `Which town or city in ${placeName} should Dial search?`,
+          },
+        );
+        return;
+      }
+    } else {
+      latitude = geo.latitude;
+      longitude = geo.longitude;
+      locationLabel = geo.label;
+      countryCode = geo.countryCode;
+    }
+  }
+  if (latitude === null || longitude === null) {
+    await setState(
+      ctx,
+      task.id,
+      'needs_user_input',
+      'Dial needs to know roughly where you are to find nearby businesses.',
+      { clarificationQuestion: 'Where should Dial search? A city, area or postcode is enough.' },
+    );
+    return;
+  }
+  if (!countryCode && latitude !== null && longitude !== null) {
+    const reverse = await ctx.discovery.reverseGeocode(latitude, longitude);
+    if (reverse) {
+      countryCode = reverse.countryCode;
+      locationLabel ??= reverse.label;
+    }
+  }
+
+  await ctx.db
+    .update(tasks)
+    .set({ latitude, longitude, locationLabel, updatedAt: new Date().toISOString() })
+    .where(eq(tasks.id, task.id));
+
+  const radiusKm = dialTask.constraints.distanceKm ?? dialTask.location?.radiusKm ?? 10;
+
+  let outcome = await ctx.discovery.discover({
+    query: dialTask.searchQuery,
+    domain: dialTask.domain,
+    latitude,
+    longitude,
+    radiusMeters: radiusKm * 1000,
+    limit: 20,
+    countryCode,
+  });
+
+  // Widen when the first pass produced too little to compare with.
+  //
+  // The measure is *callable* businesses, not businesses found: directory phone
+  // coverage varies enormously by region. A search of Riyadh returned 14 repair
+  // shops of which exactly one published a number, while Jeddah returned 49 with
+  // seven. Finding fourteen shops and being able to ring one of them is not a
+  // useful answer, and one extra directory query is far cheaper than a thin one.
+  const countCallable = (list: typeof outcome.candidates) => list.filter((c) => c.phoneE164).length;
+  const widenedKm = Math.min(radiusKm * 4, 50);
+
+  if (countCallable(outcome.candidates) < MIN_CALLABLE_BEFORE_WIDENING && widenedKm > radiusKm) {
+    const found = outcome.candidates.length;
+    await addEvent(
+      ctx,
+      task.id,
+      'researching',
+      found === 0
+        ? `Nothing within ${radiusKm} km — widening the search to ${widenedKm} km`
+        : `Only ${countCallable(outcome.candidates)} of ${found} nearby businesses list a phone number — widening the search to ${widenedKm} km`,
+    );
+
+    const wider = await ctx.discovery.discover({
+      query: dialTask.searchQuery,
+      domain: dialTask.domain,
+      latitude,
+      longitude,
+      radiusMeters: widenedKm * 1000,
+      limit: 30,
+      countryCode,
+    });
+
+    // Keep whichever pass produced more to work with. A wider search that hit a
+    // provider error must not throw away results the first pass already had.
+    if (countCallable(wider.candidates) >= countCallable(outcome.candidates) && wider.candidates.length > 0) {
+      outcome = wider;
+    }
+  }
+
+  if (outcome.candidates.length === 0) {
+    // A provider outage and a genuinely empty area are different stories.
+    if (outcome.providerErrors.length) {
+      // A timeout or rate limit is temporary. Hand the job back to the queue so
+      // it retries with backoff, exactly as a busy model does, rather than
+      // ending the task on a blip.
+      if (outcome.providerErrors.some((e) => e.retryable)) {
+        await addEvent(
+          ctx,
+          task.id,
+          'researching',
+          'The business directory is slow right now — Dial will try again shortly.',
+        );
+        incrementCounter('task.research_retry');
+        const error = new Error('Business directory unavailable') as Error & { retryable: boolean };
+        error.retryable = true;
+        throw error;
+      }
+      await failTask(
+        ctx,
+        task.id,
+        'search_unavailable',
+        'Dial could not reach the business directory just now. Please try again shortly.',
+      );
+    } else {
+      await failTask(
+        ctx,
+        task.id,
+        'no_businesses',
+        `Dial could not find any ${dialTask.searchQuery} near ${locationLabel ?? 'that location'}.`,
+      );
+    }
+    return;
+  }
+
+  const ranked = rankCandidates(outcome.candidates, { task: dialTask });
+  await saveCandidates(ctx.db, task.id, ranked);
+
+  const callable = ranked.filter((r) => !r.excludedReason).length;
+  await ctx.db
+    .update(tasks)
+    .set({ discoveredCount: outcome.candidates.length })
+    .where(eq(tasks.id, task.id));
+
+  await setState(
+    ctx,
+    task.id,
+    'candidates_ready',
+    `${outcome.candidates.length} ${outcome.candidates.length === 1 ? 'business' : 'businesses'} found`,
+  );
+
+  if (callable === 0) {
+    await failTask(
+      ctx,
+      task.id,
+      'no_phone_numbers',
+      `Dial found ${outcome.candidates.length} nearby businesses, but none published a phone number it could verify.`,
+    );
+    return;
+  }
+
+  await enqueueJob(ctx.db, 'task.plan_calls', { taskId: task.id }, { dedupeKey: `plan:${task.id}` });
+}
+
+/* ------------------------------------------------------------ plan calls */
+
+export async function handlePlanCalls(
+  ctx: OrchestratorContext,
+  payload: { taskId: string },
+): Promise<void> {
+  const task = await getTask(ctx.db, payload.taskId);
+  if (!task) return;
+  const parsed = dialTaskSchema.safeParse(task.interpreted);
+  if (!parsed.success) return;
+  const dialTask = parsed.data;
+
+  await setState(ctx, task.id, 'planning_calls');
+
+  const policy = await getUserPolicy(ctx.db, task.userId);
+
+  // Gate 1: may Dial call at all?
+  const callVerdict = canPlaceCalls({ policy, task: dialTask });
+  if (!callVerdict.allowed) {
+    await failTask(ctx, task.id, 'not_authorized', callVerdict.reason);
+    return;
+  }
+
+  // Gate 2: may Dial perform the side effect this task implies?
+  const sideEffect = canPerformSideEffect({ policy, task: dialTask });
+  if (!sideEffect.allowed) {
+    await failTask(ctx, task.id, 'not_authorized', sideEffect.reason);
+    return;
+  }
+
+  // Anything needing confirmation stops here and asks, before a single call.
+  if (callVerdict.requiresConfirmation || sideEffect.requiresConfirmation) {
+    const existing = await ctx.db
+      .select()
+      .from(authorizationRequests)
+      .where(
+        and(eq(authorizationRequests.taskId, task.id), eq(authorizationRequests.state, 'approved')),
+      )
+      .limit(1);
+
+    if (!existing.length) {
+      await requestAuthorization(ctx, task.id, task.userId, {
+        kind: sideEffect.requiresConfirmation ? sideEffect.kind : callVerdict.kind,
+        prompt: sideEffect.requiresConfirmation ? sideEffect.reason : callVerdict.reason,
+        details: { objective: dialTask.objective, sideEffect: dialTask.requestedSideEffect },
+      });
+      return;
+    }
+  }
+
+  const ranked = await listCandidates(ctx.db, task.id);
+  const targets = selectCallTargets(ranked, {
+    maxCallsPerTask: ctx.config.limits.maxCallsPerTask,
+    requested: dialTask.constraints.candidateLimit,
+  });
+
+  if (targets.length === 0) {
+    await failTask(ctx, task.id, 'no_phone_numbers', 'No business had a usable phone number.');
+    return;
+  }
+
+  // Section 27: daily ceiling, reserved atomically before any dispatch.
+  const budget = await reserveCallBudget(
+    ctx.db,
+    task.userId,
+    targets.length,
+    ctx.config.limits.maxCallsPerUserPerDay,
+  );
+  if (budget.granted === 0) {
+    await failTask(
+      ctx,
+      task.id,
+      'daily_limit',
+      "You've reached today's limit on calls Dial can place. It resets tomorrow.",
+    );
+    return;
+  }
+
+  const allowed = targets.slice(0, budget.granted);
+  const waveSize = Math.max(1, Math.min(ctx.config.limits.callWaveSize, allowed.length));
+
+  // Create the call rows up front, then dispatch in waves. The rows are the
+  // record of intent; dispatch is what actually rings a phone.
+  let wave = 1;
+  let indexInWave = 0;
+  for (const target of allowed) {
+    const phone = target.candidate.phoneE164;
+    if (!phone || !isValidE164(phone) || isBlockedNumber(phone)) continue;
+
+    await ctx.db
+      .insert(calls)
+      .values({
+        id: newId('call'),
+        taskId: task.id,
+        candidateId: target.candidate.id,
+        businessName: target.candidate.name,
+        phoneE164: phone,
+        idempotencyKey: callIdempotencyKey(task.id, target.candidate.id, 1),
+        disposition: 'pending',
+        wave,
+      })
+      .onConflictDoNothing();
+
+    indexInWave += 1;
+    if (indexInWave >= waveSize) {
+      wave += 1;
+      indexInWave = 0;
+    }
+  }
+
+  await markSelected(
+    ctx.db,
+    allowed.map((t) => t.candidate.id),
+  );
+  await audit(ctx.db, task.userId, task.id, 'calls_planned', { count: allowed.length });
+
+  await enqueueJob(
+    ctx.db,
+    'task.dispatch_wave',
+    { taskId: task.id, wave: 1 },
+    { dedupeKey: `wave:${task.id}:1` },
+  );
+}
+
+async function requestAuthorization(
+  ctx: OrchestratorContext,
+  taskId: string,
+  userId: string,
+  input: { kind: string; prompt: string; details: Record<string, unknown> },
+): Promise<void> {
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  await ctx.db.insert(authorizationRequests).values({
+    id: newId('auth'),
+    taskId,
+    userId,
+    kind: input.kind,
+    prompt: input.prompt,
+    details: input.details,
+    state: 'pending',
+    expiresAt,
+  });
+  await setState(ctx, taskId, 'awaiting_confirmation', input.prompt);
+  await notify(ctx.db, userId, taskId, 'Dial needs your approval', input.prompt);
+}
+
+/* --------------------------------------------------------- dispatch wave */
+
+export async function handleDispatchWave(
+  ctx: OrchestratorContext,
+  payload: { taskId: string; wave: number },
+): Promise<void> {
+  const task = await getTask(ctx.db, payload.taskId);
+  if (!task) return;
+  const parsed = dialTaskSchema.safeParse(task.interpreted);
+  if (!parsed.success) return;
+  const dialTask = parsed.data;
+
+  const family = getCallFamily((task.callFamily as CallFamilyId) ?? 'general_inquiry');
+  const policy = await getUserPolicy(ctx.db, task.userId);
+  const settings = await getSettings(ctx.db, task.userId);
+
+  const pending = await ctx.db
+    .select()
+    .from(calls)
+    .where(
+      and(eq(calls.taskId, task.id), eq(calls.wave, payload.wave), isNull(calls.providerCallId)),
+    );
+
+  if (pending.length === 0) {
+    await maybeAdvance(ctx, task.id);
+    return;
+  }
+
+  await setState(ctx, task.id, 'calling', `Calling ${pending.length === 1 ? 'a business' : `${pending.length} businesses`}`);
+
+  const mayCommit =
+    dialTask.requestedSideEffect === 'reservation' || dialTask.requestedSideEffect === 'appointment';
+
+  for (const call of pending) {
+    const candidateRows = await ctx.db
+      .select()
+      .from(businessCandidates)
+      .where(eq(businessCandidates.id, call.candidateId))
+      .limit(1);
+    const candidateRow = candidateRows[0];
+    if (!candidateRow) continue;
+
+    const brief = buildCallBrief({
+      task: dialTask,
+      family,
+      candidate: rowToCandidate(candidateRow),
+      policy,
+      mayCommit,
+      userFacts: {},
+      userDisplayName: null,
+    });
+
+    try {
+      const snapshot = await ctx.provider.create({
+        task: brief,
+        phone: call.phoneE164,
+        resultSchema: family.resultSchema,
+        metadata: { dial_task_id: task.id, dial_call_id: call.id },
+        idempotencyKey: call.idempotencyKey,
+        ...(ctx.config.calle.webhookUrl ? { webhookUrl: ctx.config.calle.webhookUrl } : {}),
+        locale: settings.callingLanguage,
+      });
+
+      await ctx.db
+        .update(calls)
+        .set({
+          // Recorded per call, not read from config at render time, so a
+          // simulated call stays identifiable as simulated forever.
+          provider: ctx.provider.name,
+          providerCallId: snapshot.providerCallId,
+          providerStatus: snapshot.status,
+          dispatchedAt: new Date().toISOString(),
+          waitingSince: new Date().toISOString(),
+          attemptCount: call.attemptCount + 1,
+        })
+        .where(eq(calls.id, call.id));
+
+      incrementCounter('calls.dispatched', { provider: ctx.provider.name });
+      await addEvent(ctx, task.id, 'calling', `Calling ${call.businessName}`);
+
+      if (isTerminal(snapshot.status)) {
+        // Some outcomes are known the moment the call is created — an invalid
+        // number, a blocked recipient, or a provider that already has the
+        // result. Waiting to poll for those would just delay the answer.
+        await applyTerminalSnapshot(ctx, task.id, call.id, snapshot);
+      } else {
+        await enqueueJob(
+          ctx.db,
+          'task.poll_call',
+          { taskId: task.id, callId: call.id },
+          { runAt: new Date(Date.now() + ctx.config.limits.pollDelayMs), dedupeKey: `poll:${call.id}` },
+        );
+      }
+    } catch (error) {
+      await handleDispatchError(ctx, task.id, call.id, call.businessName, error);
+    }
+  }
+
+  // Safety net: if every call somehow never reports back, finish anyway.
+  await enqueueJob(
+    ctx.db,
+    'task.timeout',
+    { taskId: task.id },
+    { runAt: new Date(Date.now() + 15 * 60_000), dedupeKey: `timeout:${task.id}` },
+  );
+
+  // Some or all of this wave may already be terminal (applied inline above, or
+  // failed at dispatch). Advance now rather than waiting on a poll that will
+  // never come.
+  await maybeAdvance(ctx, task.id);
+}
+
+async function handleDispatchError(
+  ctx: OrchestratorContext,
+  taskId: string,
+  callId: string,
+  businessName: string,
+  error: unknown,
+): Promise<void> {
+  const providerError = error instanceof ProviderError ? error : null;
+  const code = providerError?.code ?? 'provider_unavailable';
+
+  // Retryable errors are left for the job queue to redeliver.
+  if (providerError?.retryable) throw error;
+
+  await ctx.db
+    .update(calls)
+    .set({
+      disposition: 'failed',
+      failureCode: code,
+      // Deliberately not passing the provider message as a fallback: an
+      // unknown code would then put raw provider text in the UI.
+      failureMessage: describeCalleError(code),
+      completedAt: new Date().toISOString(),
+    })
+    .where(eq(calls.id, callId));
+
+  incrementCounter('calls.dispatch_failed', { code });
+  logger.warn('call dispatch failed', { taskId, callId, code });
+  await addEvent(ctx, taskId, 'calling', `${businessName}: ${describeCalleError(code)}`);
+
+  // Balance and auth failures affect every remaining call, so stop early
+  // rather than burning through the list producing the same error.
+  if (code === 'insufficient_balance' || code === 'unauthorized' || code === 'forbidden') {
+    await failTask(ctx, taskId, code, describeCalleError(code));
+  }
+}
+
+/* ------------------------------------------------------------- poll call */
+
+/**
+ * How far along a call is, as far as the provider will say.
+ *
+ * The distinction that matters is between waiting for a phone to be picked up
+ * and waiting for a conversation to finish. Only the first is what the answer
+ * budget is for; applying it to the second cuts off calls that are going fine.
+ *
+ * Read from the attempts rather than the call status, because the call-level
+ * `in_progress` covers the whole job -- CALL-E's own queue and the dialling
+ * included -- while an attempt distinguishes `dialing` from `in_progress`.
+ * Transcript turns count as proof on their own: words were exchanged, so
+ * somebody answered.
+ */
+export type CallPhase = 'queued' | 'ringing' | 'answered';
+
+export function callPhase(snapshot: {
+  status: string;
+  attempts: Array<{ status: string; transcript: unknown[] }>;
+}): CallPhase {
+  const answered = snapshot.attempts.some(
+    (a) => a.status === 'in_progress' || a.status === 'completed' || a.transcript.length > 0,
+  );
+  if (answered) return 'answered';
+  // Still sitting in the provider's queue: nothing has rung yet, so none of
+  // this time belongs to the answer budget.
+  if (snapshot.status === 'queued') return 'queued';
+  if (snapshot.attempts.some((a) => a.status === 'queued')) return 'queued';
+  return 'ringing';
+}
+
+export async function handlePollCall(
+  ctx: OrchestratorContext,
+  payload: { taskId: string; callId: string },
+): Promise<void> {
+  const rows = await ctx.db.select().from(calls).where(eq(calls.id, payload.callId)).limit(1);
+  const call = rows[0];
+  if (!call || !call.providerCallId) return;
+  // A call abandoned on the answer budget is still watched: it cannot be
+  // cancelled, so it may yet produce the answer the task was asked for.
+  const abandoned = call.failureCode === 'answer_timeout';
+  if (call.disposition !== 'pending' && !abandoned) {
+    await maybeAdvance(ctx, payload.taskId);
+    return;
+  }
+
+  const snapshot = await ctx.provider.get(call.providerCallId);
+
+  if (!isTerminal(snapshot.status)) {
+    const phase = callPhase(snapshot);
+
+    /*
+     * The clock starts when the phone starts ringing, not when Dial handed the
+     * call over.
+     *
+     * CALL-E queues before it dials, and that queue can outlast the whole
+     * answer budget. Measured from dispatch, Dial gave up on five businesses
+     * for "no answer" while every one of them was still waiting to be dialled
+     * -- CALL-E then rang them, held a six-minute conversation with one, got a
+     * price, and by then the call had been written off. Nothing rang, so none
+     * of that time was the business failing to answer.
+     */
+    const stillQueued = phase === 'queued';
+    const startedRinging = !stillQueued && call.providerStatus === 'queued';
+
+    await ctx.db
+      .update(calls)
+      .set({
+        providerStatus: snapshot.status,
+        ...(startedRinging ? { waitingSince: new Date().toISOString() } : {}),
+      })
+      .where(eq(calls.id, call.id));
+
+    // How long the phone has been ringing, unanswered.
+    const since = (startedRinging ? null : call.waitingSince) ?? call.dispatchedAt;
+    const waitedMs = since && !startedRinging ? Date.now() - new Date(since).getTime() : 0;
+    const budgetMs =
+      ctx.config.limits.answerTimeoutMs * ctx.config.limits.maxAttemptsPerBusiness;
+
+    /*
+     * Never applied to a call that has been answered. The budget bounds how
+     * long Dial waits for a pickup; a conversation in progress is the thing it
+     * was waiting for, and cutting it off would discard the answer and report
+     * "no answer" about a business that did answer.
+     */
+    if (phase !== 'answered' && !stillQueued && waitedMs >= budgetMs) {
+      // Give up waiting and let another business have a turn.
+      //
+      // Note what this is NOT: CALL-E exposes no way to cancel a call in
+      // flight, so the phone may still be ringing. Dial stops waiting; it
+      // cannot stop the call. The wording reflects that.
+      await ctx.db
+        .update(calls)
+        .set({
+          disposition: 'no_answer',
+          failureCode: 'answer_timeout',
+          failureMessage: `No answer within ${Math.round(budgetMs / 1000)} seconds.`,
+          completedAt: new Date().toISOString(),
+        })
+        .where(and(eq(calls.id, call.id), eq(calls.disposition, 'pending')));
+
+      incrementCounter('calls.answer_timeout');
+      await addEvent(
+        ctx,
+        payload.taskId,
+        'calling',
+        `${call.businessName}: no answer after ${Math.round(budgetMs / 1000)}s — trying another business`,
+      );
+      // Keep watching anyway. Dial has moved on to another business, but the
+      // phone may still be ringing and the result is worth having if it comes.
+      await enqueueJob(
+        ctx.db,
+        'task.poll_call',
+        payload,
+        {
+          runAt: new Date(Date.now() + ctx.config.limits.pollDelayMs),
+          dedupeKey: `poll:${call.id}:${Date.now()}`,
+        },
+      );
+      await maybeAdvance(ctx, payload.taskId);
+      return;
+    }
+
+    await enqueueJob(
+      ctx.db,
+      'task.poll_call',
+      payload,
+      { runAt: new Date(Date.now() + ctx.config.limits.pollDelayMs), dedupeKey: `poll:${call.id}:${Date.now()}` },
+    );
+    return;
+  }
+
+  await applyTerminalSnapshot(ctx, payload.taskId, call.id, snapshot);
+  await maybeAdvance(ctx, payload.taskId);
+}
+
+/**
+ * Records a terminal call outcome. Shared by the poller and the webhook
+ * receiver, so both paths produce identical rows and neither can double-apply.
+ */
+export async function applyTerminalSnapshot(
+  ctx: OrchestratorContext,
+  taskId: string,
+  callId: string,
+  snapshot: Awaited<ReturnType<OrchestratorContext['provider']['get']>>,
+): Promise<void> {
+  const task = await getTask(ctx.db, taskId);
+  const family = getCallFamily((task?.callFamily as CallFamilyId) ?? 'general_inquiry');
+  const settings = task ? await getSettings(ctx.db, task.userId) : null;
+
+  const parsedResult = family.parse(snapshot.structuredResult);
+  const disposition = deriveDisposition(snapshot, parsedResult, family.viabilityField);
+
+  const updated = await ctx.db
+    .update(calls)
+    .set({
+      providerStatus: snapshot.status,
+      disposition,
+      structuredResult: parsedResult,
+      summary: snapshot.summary,
+      completionConfidence: snapshot.completionConfidence,
+      taskCompleted: snapshot.taskCompleted,
+      evidence: snapshot.evidence,
+      failureCode: snapshot.failureCode,
+      failureMessage: snapshot.failureMessage
+        ? describeCalleError(snapshot.failureCode, snapshot.failureMessage)
+        : null,
+      startedAt: snapshot.attempts[0]?.startedAt ?? null,
+      completedAt: snapshot.completedAt ?? new Date().toISOString(),
+    })
+    /*
+     * Only a call still pending is updated, so a webhook and a poll racing each
+     * other cannot both apply the result -- with one exception: a call Dial
+     * stopped waiting for.
+     *
+     * CALL-E exposes no way to cancel a call in flight, so one abandoned on the
+     * answer budget may still be connected, and may still come back with the
+     * answer the whole task was for. Leaving the row saying "no answer" when a
+     * price was quoted would be a lie Dial had the evidence to correct.
+     */
+    .where(
+      and(
+        eq(calls.id, callId),
+        or(eq(calls.disposition, 'pending'), eq(calls.failureCode, 'answer_timeout')),
+      ),
+    )
+    .returning({ id: calls.id, businessName: calls.businessName });
+
+  if (!updated.length) return;
+
+  for (const attempt of snapshot.attempts) {
+    await ctx.db
+      .insert(callAttempts)
+      .values({
+        id: newId('att'),
+        callId,
+        providerAttemptId: attempt.id,
+        status: attempt.status,
+        phoneMasked: attempt.phoneMasked,
+        summary: attempt.summary,
+        // Retention of 0 means the user asked Dial never to keep transcripts.
+        transcript: settings?.transcriptRetentionDays === 0 ? [] : attempt.transcript,
+        failureCode: attempt.failureCode,
+        failureMessage: attempt.failureMessage,
+        startedAt: attempt.startedAt,
+        completedAt: attempt.completedAt,
+      })
+      .onConflictDoNothing();
+  }
+
+  incrementCounter('calls.completed', { disposition });
+  await addEvent(
+    ctx,
+    taskId,
+    'collecting_results',
+    `${updated[0]!.businessName}: ${dispositionLine(disposition)}`,
+  );
+}
+
+function dispositionLine(disposition: CallDisposition): string {
+  switch (disposition) {
+    case 'answered_useful':
+      return 'answered';
+    case 'answered_no_answer_to_question':
+      return "answered but couldn't say";
+    case 'refused':
+      return 'declined to answer';
+    case 'no_answer':
+      return 'no answer';
+    case 'voicemail':
+      return 'reached voicemail';
+    case 'needs_review':
+      return 'answer unclear';
+    default:
+      return "couldn't connect";
+  }
+}
+
+/**
+ * Section 13 / section 28: turning a call into a verdict.
+ * The one rule that matters: a non-answer never becomes a positive answer.
+ */
+export function deriveDisposition(
+  snapshot: { status: string; structuredResult: unknown; summary: string | null; failureCode: string | null },
+  parsedResult: Record<string, unknown> | null,
+  viabilityField: string | null,
+): CallDisposition {
+  if (snapshot.status === 'failed' || snapshot.status === 'canceled') {
+    if (snapshot.failureCode === 'no_answer') return 'no_answer';
+    return 'failed';
+  }
+
+  const summary = (snapshot.summary ?? '').toLowerCase();
+  if (/voicemail|answering machine|answerphone/.test(summary)) return 'voicemail';
+
+  // CALL-E returning null means it could not produce a schema-valid result.
+  // That is the honest "do not act" signal, and it must not be read as a no.
+  if (parsedResult === null) return 'needs_review';
+
+  if (viabilityField) {
+    const value = parsedResult[viabilityField];
+    if (value === 'yes' || value === 'available' || value === 'alternative_offered') {
+      return 'answered_useful';
+    }
+    if (value === 'unknown') {
+      const refused = typeof parsedResult['refused_reason'] === 'string' && parsedResult['refused_reason'];
+      return refused ? 'refused' : 'answered_no_answer_to_question';
+    }
+    // An explicit "no" is a real, useful answer: this business cannot help.
+    return 'answered_useful';
+  }
+  return 'answered_useful';
+}
+
+/* --------------------------------------------------------------- advance */
+
+/**
+ * Decides what happens after a call finishes: dispatch the next wave, or stop
+ * and compare. Section 14 -- avoid calling twenty businesses when four have
+ * already answered the question.
+ */
+export async function maybeAdvance(ctx: OrchestratorContext, taskId: string): Promise<void> {
+  const task = await getTask(ctx.db, taskId);
+  if (!task || ['completed', 'partially_completed', 'failed', 'canceled'].includes(task.state)) return;
+
+  const all = await ctx.db.select().from(calls).where(eq(calls.taskId, taskId));
+
+  // "Outstanding" means dispatched and still waiting on a result. Rows that
+  // have not been dialled yet are the *next wave* -- counting them here made
+  // this return early every time, so waves after the first were never
+  // dispatched and simply sat in the UI as "In progress" forever.
+  const outstanding = all.filter((c) => c.disposition === 'pending' && c.providerCallId);
+  if (outstanding.length > 0) return;
+
+  const useful = all.filter((c) => c.disposition === 'answered_useful').length;
+  const nextWave = all.find((c) => !c.providerCallId)?.wave ?? null;
+
+  // Enough evidence: stop. Every extra call costs money and rings a real
+  // business, so there is no reason to keep going.
+  if (useful >= 2) {
+    await enqueueJob(
+      ctx.db,
+      'task.compare',
+      { taskId },
+      { dedupeKey: `compare:${taskId}:${all.length}` },
+    );
+    return;
+  }
+
+  if (nextWave === null) {
+    // Nothing pre-planned is left, but businesses that did not answer should
+    // not end the task while other candidates are sitting unused.
+    const replaced = await substituteUnansweredCandidate(ctx, taskId, all);
+    if (replaced) return;
+
+    await enqueueJob(
+      ctx.db,
+      'task.compare',
+      { taskId },
+      { dedupeKey: `compare:${taskId}:${all.length}` },
+    );
+    return;
+  }
+
+  await enqueueJob(
+    ctx.db,
+    'task.dispatch_wave',
+    { taskId, wave: nextWave },
+    { dedupeKey: `wave:${taskId}:${nextWave}` },
+  );
+}
+
+/**
+ * Dispatches the next-best business Dial has not tried yet, to replace one that
+ * did not answer.
+ *
+ * Bounded by the same per-task ceiling as the original plan, so a run of
+ * unanswered calls cannot quietly turn a 3-call task into a 20-call one. Returns
+ * true when a replacement was dispatched.
+ */
+async function substituteUnansweredCandidate(
+  ctx: OrchestratorContext,
+  taskId: string,
+  existing: Array<{ candidateId: string; disposition: string; wave: number; id: string }>,
+): Promise<boolean> {
+  if (existing.length >= ctx.config.limits.maxCallsPerTask) return false;
+
+  // Only worth substituting for a business that never gave an answer.
+  const unanswered = existing.filter((c) =>
+    ['no_answer', 'voicemail', 'failed'].includes(c.disposition),
+  );
+  if (unanswered.length === 0) return false;
+
+  const tried = new Set(existing.map((c) => c.candidateId));
+  const ranked = await listCandidates(ctx.db, taskId);
+  const next = ranked.find(
+    (r) => !r.excludedReason && r.candidate.phoneE164 && !tried.has(r.candidate.id),
+  );
+  if (!next) return false;
+
+  const phone = next.candidate.phoneE164!;
+  if (!isValidE164(phone) || isBlockedNumber(phone)) return false;
+
+  const task = await getTask(ctx.db, taskId);
+  if (!task) return false;
+
+  // The daily ceiling still applies to a replacement.
+  const budget = await reserveCallBudget(
+    ctx.db,
+    task.userId,
+    1,
+    ctx.config.limits.maxCallsPerUserPerDay,
+  );
+  if (budget.granted === 0) return false;
+
+  const wave = Math.max(...existing.map((c) => c.wave), 1) + 1;
+  await ctx.db
+    .insert(calls)
+    .values({
+      id: newId('call'),
+      taskId,
+      candidateId: next.candidate.id,
+      businessName: next.candidate.name,
+      phoneE164: phone,
+      idempotencyKey: callIdempotencyKey(taskId, next.candidate.id, 1),
+      disposition: 'pending',
+      wave,
+      replacedCallId: unanswered[0]!.id,
+    })
+    .onConflictDoNothing();
+
+  await markSelected(ctx.db, [next.candidate.id]);
+  await addEvent(ctx, taskId, 'calling', `Trying ${next.candidate.name} instead`);
+  incrementCounter('calls.substituted');
+
+  await enqueueJob(
+    ctx.db,
+    'task.dispatch_wave',
+    { taskId, wave },
+    { dedupeKey: `wave:${taskId}:${wave}` },
+  );
+  return true;
+}
+
+/* --------------------------------------------------------------- compare */
+
+export async function handleCompare(
+  ctx: OrchestratorContext,
+  payload: { taskId: string },
+): Promise<void> {
+  const task = await getTask(ctx.db, payload.taskId);
+  if (!task) return;
+  const parsed = dialTaskSchema.safeParse(task.interpreted);
+  if (!parsed.success) return;
+
+  await setState(ctx, task.id, 'comparing');
+
+  // Businesses that were planned but never needed, because Dial stopped once it
+  // had enough answers, must not sit in the UI as "In progress" forever. The
+  // row stays -- it is a real part of the plan and part of the evidence trail --
+  // but it stops claiming a call is under way.
+  await ctx.db
+    .update(calls)
+    .set({
+      disposition: 'not_needed',
+      failureMessage: 'Dial had enough answers before reaching this one.',
+      completedAt: new Date().toISOString(),
+    })
+    .where(
+      and(
+        eq(calls.taskId, task.id),
+        eq(calls.disposition, 'pending'),
+        isNull(calls.providerCallId),
+      ),
+    );
+
+  const family = getCallFamily((task.callFamily as CallFamilyId) ?? 'general_inquiry');
+  const callRecords = await listCalls(ctx.db, task.id);
+  const candidates = await listCandidates(ctx.db, task.id);
+  const byId = new Map(candidates.map((c) => [c.candidate.id, c.candidate]));
+
+  const result: TaskResult = compareOutcomes({
+    task: parsed.data,
+    family,
+    calls: callRecords,
+    candidatesById: byId,
+    discoveredCount: task.discoveredCount,
+  });
+
+  // Partial completion is a legitimate outcome, and is reported as such.
+  const state = result.best
+    ? result.tally.answered < result.tally.contacted
+      ? 'partially_completed'
+      : 'completed'
+    : 'partially_completed';
+
+  await setState(ctx, task.id, state, result.headline, {
+    result,
+    headline: result.headline,
+    completedAt: new Date().toISOString(),
+  });
+
+  observe('task.calls_per_task', result.tally.contacted, {});
+  incrementCounter('task.finished', { state });
+
+  await notify(ctx.db, task.userId, task.id, 'Your Dial result is ready', result.headline);
+  ctx.publish(task.id, { type: 'result', taskId: task.id, at: new Date().toISOString() });
+}
+
+/* --------------------------------------------------------------- timeout */
+
+export async function handleTimeout(
+  ctx: OrchestratorContext,
+  payload: { taskId: string },
+): Promise<void> {
+  const task = await getTask(ctx.db, payload.taskId);
+  if (!task) return;
+  if (['completed', 'partially_completed', 'failed', 'canceled'].includes(task.state)) return;
+
+  const stuck = await ctx.db
+    .select()
+    .from(calls)
+    .where(and(eq(calls.taskId, task.id), eq(calls.disposition, 'pending')));
+
+  for (const call of stuck) {
+    await ctx.db
+      .update(calls)
+      .set({
+        disposition: 'failed',
+        failureCode: 'timeout',
+        failureMessage: 'Dial did not receive a result for this call in time.',
+        completedAt: new Date().toISOString(),
+      })
+      .where(eq(calls.id, call.id));
+  }
+
+  await handleCompare(ctx, { taskId: task.id });
+}
+
+/* ---------------------------------------------------------------- helper */
+
+/**
+ * Last line of defence for section 36.
+ *
+ * Everything that calls failTask is supposed to pass wording we wrote. This
+ * catches the case where something slips through anyway — a raw provider JSON
+ * body, a stack trace, an SQL error — and replaces it rather than putting it in
+ * front of a user. It is cheap, and the failure mode it prevents is ugly.
+ */
+export function presentableFailure(message: string): string {
+  const text = (message ?? '').trim();
+
+  const looksInternal =
+    !text ||
+    text.length > 300 ||
+    text.startsWith('{') ||
+    text.startsWith('[') ||
+    text.startsWith('<') ||
+    /^\w*Error:/.test(text) ||
+    /\bat\s+\w+.*:\d+:\d+/.test(text) ||
+    /"(error|status|code|message)"\s*:/.test(text) ||
+    /\b(ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|undefined is not|Cannot read propert)\b/.test(text) ||
+    /\b(syntax error|relation ".*" does not exist|stack trace)\b/i.test(text);
+
+  return looksInternal
+    ? 'Dial ran into a problem and stopped. Please try again in a few minutes.'
+    : text;
+}
+
+export async function failTask(
+  ctx: OrchestratorContext,
+  taskId: string,
+  code: string,
+  rawMessage: string,
+): Promise<void> {
+  const message = presentableFailure(rawMessage);
+  if (message !== rawMessage) {
+    // Keep the real detail where engineers can find it, out of the UI.
+    logger.error('failure message was not presentable; substituted', { taskId, code, rawMessage });
+  }
+
+  await setState(ctx, taskId, 'failed', message, {
+    failureCode: code,
+    failureMessage: message,
+    headline: message,
+    completedAt: new Date().toISOString(),
+  });
+  incrementCounter('task.failed', { code });
+  const task = await getTask(ctx.db, taskId);
+  if (task) {
+    await notify(ctx.db, task.userId, taskId, "Dial couldn't finish that", message);
+  }
+}
+
+export { sql };

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.next/
+.expo/
+.pgdata/
+*.tsbuildinfo
+.env
+.env.local
+.DS_Store
+coverage/
+*.log
+android/
+ios/
