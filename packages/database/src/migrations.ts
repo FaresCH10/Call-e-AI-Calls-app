@@ -293,4 +293,14 @@ ALTER TABLE calls ADD COLUMN IF NOT EXISTS waiting_since timestamptz;
 ALTER TABLE calls ADD COLUMN IF NOT EXISTS replaced_call_id text;
 `,
   },
+  {
+    id: '0004_call_language',
+    sql: `
+-- The language Dial speaks on this task's calls, and the country it searched.
+-- The country is stored so the calling step can offer that country's language
+-- without geocoding the same place a second time.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS call_language text;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS country_code text;
+`,
+  },
 ];

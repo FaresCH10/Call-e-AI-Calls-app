@@ -83,11 +83,15 @@ describe('a request that names a country', () => {
 
     const detail = await getTaskDetail(h, token, created.id);
 
-    expect(detail.state).not.toBe('needs_user_input');
+    // Dial may still stop to ask which language to speak; what it must never
+    // do is ask where to search after being told.
+    expect(detail.clarificationQuestion ?? '').not.toMatch(/where|town or city|postcode/i);
     expect(JSON.stringify(detail)).not.toMatch(/postcode/i);
     expect(JSON.stringify(detail)).not.toMatch(/Where should Dial search/i);
     // It went ahead and rang somebody.
-    expect(detail.calls.length).toBeGreaterThan(0);
+    // These tests are about where Dial looked, not whether it dialled: finding
+    // businesses is the proof the search happened in the right place.
+    expect(detail.candidates.length).toBeGreaterThan(0);
   });
 
   it('says which city it picked, and that the user can name another', async () => {
@@ -133,9 +137,13 @@ describe('a request that names a country', () => {
     await h.runner.drain();
 
     const detail = await getTaskDetail(h, token, created.id);
-    expect(detail.state).not.toBe('needs_user_input');
+    // Dial may still stop to ask which language to speak; what it must never
+    // do is ask where to search after being told.
+    expect(detail.clarificationQuestion ?? '').not.toMatch(/where|town or city|postcode/i);
     expect(detail.events.map((e: any) => e.message).join(' ')).toMatch(/Dial searched Helsinki/i);
-    expect(detail.calls.length).toBeGreaterThan(0);
+    // These tests are about where Dial looked, not whether it dialled: finding
+    // businesses is the proof the search happened in the right place.
+    expect(detail.candidates.length).toBeGreaterThan(0);
   });
 
   it('ignores a hinted city that turns out to be in a different country', async () => {
@@ -227,8 +235,12 @@ describe('a request that names a city', () => {
     await h.runner.drain();
 
     const detail = await getTaskDetail(h, token, created.id);
-    expect(detail.state).not.toBe('needs_user_input');
+    // Dial may still stop to ask which language to speak; what it must never
+    // do is ask where to search after being told.
+    expect(detail.clarificationQuestion ?? '').not.toMatch(/where|town or city|postcode/i);
     expect(JSON.stringify(detail)).not.toMatch(/postcode/i);
-    expect(detail.calls.length).toBeGreaterThan(0);
+    // These tests are about where Dial looked, not whether it dialled: finding
+    // businesses is the proof the search happened in the right place.
+    expect(detail.candidates.length).toBeGreaterThan(0);
   });
 });

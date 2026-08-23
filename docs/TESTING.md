@@ -61,6 +61,10 @@ exercised are marked PASS.
 | A directory timeout retries instead of failing | PASS | Overpass mirror + queue backoff |
 | A country is refused as too coarse to search | PASS | `finland` -> country/1181 km -> asks for a town instead of reporting no shops exist |
 | Zero results widens the radius before giving up | PASS | 4x, capped at 50 km |
+| A second server is refused, not allowed to corrupt the database | PASS | Live: refused by pid, first server stayed healthy |
+| A lock left by a dead process does not block startup | PASS | Cleared with a warning rather than requiring manual deletion |
+| A damaged database recovers on the next start | PASS | Live: moved to `.pgdata.corrupt-20260823-101534`, fresh one created, migrations ran |
+| An unopenable database gives an actionable error | PASS | Names the cause and the fix, never `Aborted()` |
 | Google types map to Dial's vocabulary | PASS | `locality`->city, `administrative_area_level_1`->state; a country stays too coarse to search |
 | A disabled Google API does not break geocoding | PASS | Live: real key with all three APIs off — Google rejected, Nominatim answered, Dubai and Saudi Arabia both resolved |
 | A rejected key is not reported as an empty area | PASS | `REQUEST_DENIED` raises; only `ZERO_RESULTS` returns null |

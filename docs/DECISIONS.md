@@ -606,3 +606,39 @@ to correct.
 The wording was accurate for what the code measured and false about the world,
 which is the worst combination: it reported a business as unresponsive when the
 business had answered, quoted, and been ignored.
+
+## 37. One process may hold the local database, and it must say so
+
+The server died on startup with `Aborted(). Build with -sASSERTIONS for more
+info.` -- a WASM-level abort naming nothing. It happened three times during
+development, and each time the fix was to work out by hand which directory was
+broken and move it aside.
+
+The cause was always the same. PGlite is a single process holding a directory,
+and `tsx watch` plus a few stray `npm run dev:api` invocations produce several
+at once. They do not queue: they corrupt the database, and every start
+afterwards aborts.
+
+PGlite's own `postmaster.pid` cannot detect this -- it holds the sentinel `-42`
+rather than a real process id, so every check reads as "nobody is there" and
+the second server proceeds. Dial now writes `dial-server.lock` containing its
+actual pid. A live holder is refused by name:
+
+> Another Dial server (pid 26692) already has .pgdata open. PGlite allows one
+> process at a time, and a second one corrupts the database.
+
+A lock whose process is gone is cleared rather than blocking startup forever,
+which is the failure mode a naive lock file would have introduced instead.
+
+Recovery had to be split across two starts, which is not obvious. When a
+database is found damaged, the directory cannot be moved *by the process that
+found it*: the failed instance keeps handles inside it for the life of that
+process, and Windows refuses to rename a directory with open handles. Renaming
+it was attempted, failed with `EPERM`, and the error was swallowed -- so the
+"fresh" start reopened the same broken directory and reported the same abort
+with the cause now hidden. Instead the damaged copy is marked, the server stops
+with an error that says what to do, and the next start clears it before opening
+anything, which is the one moment no handles exist.
+
+The damaged directory is always kept, never deleted. This is development data,
+but it is still somebody's.

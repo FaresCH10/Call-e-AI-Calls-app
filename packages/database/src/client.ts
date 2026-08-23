@@ -1,5 +1,7 @@
 import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
 import { drizzle as drizzlePg, type NodePgDatabase } from 'drizzle-orm/node-postgres';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { sql } from 'drizzle-orm';
 import { config } from '@dial/config';
@@ -29,6 +31,17 @@ export interface DatabaseHandle {
 
 let handle: DatabaseHandle | null = null;
 
+/** Names the process that holds the directory. Not PGlite's own lock. */
+const LOCK_FILE = 'dial-server.lock';
+
+/**
+ * Left behind when a database is found to be damaged, so the next start can
+ * clear it. The move cannot happen in the process that found the damage: the
+ * failed PGlite keeps the directory open for the life of that process, and
+ * Windows will not rename a directory with open handles inside it.
+ */
+const CORRUPT_MARKER = 'dial-corrupt';
+
 export async function createDatabase(options?: {
   url?: string;
   /** PGlite data directory; 'memory://' gives a throwaway instance for tests. */
@@ -50,8 +63,7 @@ export async function createDatabase(options?: {
   }
 
   const dataDir = options?.dataDir ?? process.env.PGLITE_DIR ?? '.pgdata';
-  const client = new PGlite(dataDir);
-  await client.waitReady;
+  const client = await openPglite(dataDir);
   // The query surface drizzle exposes is identical across both drivers; the
   // cast keeps one Db type across the codebase instead of a union at every use.
   const db = drizzlePglite(client, { schema }) as unknown as Db;
@@ -60,8 +72,169 @@ export async function createDatabase(options?: {
     driver: 'pglite',
     close: async () => {
       await client.close();
+      await releaseDataDir(dataDir);
     },
   };
+}
+
+/**
+ * Opens the on-disk database, surviving the two ways it goes wrong.
+ *
+ * PGlite is a single process holding a directory. Two servers started against
+ * the same one do not queue politely -- they corrupt it, and every later start
+ * dies with `Aborted()`, a WASM-level abort that says nothing about the cause.
+ * That happened three times during development before the pattern was obvious,
+ * and each time the fix was manual.
+ *
+ * So: refuse the second instance rather than let it do damage, clear a lock
+ * left behind by a process that was killed, and if the directory is beyond
+ * saving, move it aside and start fresh rather than leaving the app dead. The
+ * old directory is preserved, never deleted -- this runs only in development,
+ * but it is still somebody's data.
+ */
+async function openPglite(dataDir: string): Promise<PGlite> {
+  // Throwaway instances share nothing and cannot conflict.
+  if (dataDir.startsWith('memory://')) {
+    const client = new PGlite(dataDir);
+    await client.waitReady;
+    return client;
+  }
+
+  await claimDataDir(dataDir);
+  await clearIfMarkedCorrupt(dataDir);
+
+  let client: PGlite | undefined;
+  try {
+    client = new PGlite(dataDir);
+    await client.waitReady;
+    return client;
+  } catch (error) {
+    /*
+     * Release whatever the failed instance still holds before moving the
+     * directory. Windows refuses to rename a directory that has open handles
+     * inside it, and an abort during startup does not close them by itself --
+     * without this the move fails and the "fresh" start reopens the same broken
+     * directory, reporting the same error with the cause now hidden.
+     */
+    await client?.close().catch(() => undefined);
+
+    /*
+     * Mark it and stop. The directory cannot be moved from here -- the failed
+     * instance still holds handles inside it -- so recovery is handed to the
+     * next start, which has none.
+     */
+    await fs
+      .writeFile(path.join(dataDir, CORRUPT_MARKER), (error as Error).message, 'utf8')
+      .catch(() => undefined);
+    await releaseDataDir(dataDir);
+
+    logger.error('the local database is damaged', {
+      dataDir,
+      error: (error as Error).message,
+      likelyCause: 'two servers running against the same directory, or one killed mid-write',
+    });
+    throw new Error(
+      `The local database at ${dataDir} is damaged and cannot be opened. ` +
+        'Start the server again and Dial will move it aside and begin a fresh one. ' +
+        'This happens when two servers share the directory, which PGlite does not allow.',
+    );
+  }
+}
+
+/**
+ * Clears a database the previous start found damaged.
+ *
+ * Runs before anything opens the directory, which is the only moment the move
+ * can succeed. The damaged copy is kept, never deleted -- this is development
+ * data, but it is still somebody's.
+ */
+async function clearIfMarkedCorrupt(dataDir: string): Promise<void> {
+  const marker = path.join(dataDir, CORRUPT_MARKER);
+  const found = await fs.readFile(marker, 'utf8').catch(() => null);
+  if (found === null) return;
+
+  const quarantined = `${dataDir}.corrupt-${timestamp()}`;
+  await moveAside(dataDir, quarantined);
+  logger.warn('moved a damaged database aside and started a fresh one', {
+    dataDir,
+    movedTo: quarantined,
+    originalError: found.slice(0, 200),
+  });
+}
+
+/**
+ * Moves a directory out of the way, retrying while handles are released.
+ *
+ * Reported rather than swallowed. If the move quietly fails, the fresh start
+ * opens the same broken directory and fails again with a message that now
+ * points at the wrong cause.
+ */
+async function moveAside(from: string, to: string): Promise<void> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await fs.rename(from, to);
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+  throw new Error(
+    `The local database at ${from} is unusable and could not be moved aside ` +
+      `(${(lastError as Error)?.message}). Stop every running server, then ` +
+      `delete or rename that directory by hand.`,
+  );
+}
+
+/**
+ * Refuses to open a database another Dial server already has.
+ *
+ * PGlite's own `postmaster.pid` cannot be used for this: it carries a sentinel
+ * (-42) rather than a real process id, so every check reads as "nobody is
+ * there" and a second server opens the directory and corrupts it. This lock
+ * holds the actual pid, so a live instance is recognised and a stale file from
+ * a killed process is cleared instead of blocking startup forever.
+ */
+async function claimDataDir(dataDir: string): Promise<void> {
+  const lockPath = path.join(dataDir, LOCK_FILE);
+  const existing = await fs.readFile(lockPath, 'utf8').catch(() => null);
+
+  if (existing !== null) {
+    const pid = Number.parseInt(existing.trim(), 10);
+    if (Number.isFinite(pid) && pid > 0 && pid !== process.pid && isProcessAlive(pid)) {
+      throw new Error(
+        `Another Dial server (pid ${pid}) already has ${dataDir} open. PGlite ` +
+          'allows one process at a time, and a second one corrupts the database. ' +
+          'Stop the other server first.',
+      );
+    }
+    logger.warn('clearing a database lock left by a process that is gone', { dataDir, pid });
+  }
+
+  await fs.mkdir(dataDir, { recursive: true }).catch(() => undefined);
+  await fs.writeFile(lockPath, String(process.pid), 'utf8').catch(() => undefined);
+}
+
+/** Gives up the claim, so the next start does not have to reason about it. */
+async function releaseDataDir(dataDir: string): Promise<void> {
+  if (dataDir.startsWith('memory://')) return;
+  await fs.rm(path.join(dataDir, LOCK_FILE), { force: true }).catch(() => undefined);
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    // Signal 0 performs the permission and existence checks without delivering.
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means it exists but belongs to someone else, which still counts.
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+function timestamp(): string {
+  return new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
 }
 
 export async function getDatabase(): Promise<DatabaseHandle> {

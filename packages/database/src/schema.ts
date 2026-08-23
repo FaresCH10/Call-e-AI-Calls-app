@@ -105,6 +105,14 @@ export const tasks = pgTable(
     latitude: doublePrecision('latitude'),
     longitude: doublePrecision('longitude'),
     locationLabel: text('location_label'),
+    /**
+     * BCP-47 language for this task's calls, once the user has chosen one.
+     * Null means nothing has been decided and the saved preference applies.
+     */
+    callLanguage: text('call_language'),
+    /** ISO 3166-1 alpha-2 of the area searched, so the calling step can offer
+     * that country's language without geocoding again. */
+    countryCode: text('country_code'),
     /** Final TaskResult once comparison has run. */
     result: jsonb('result'),
     headline: text('headline'),

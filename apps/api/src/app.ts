@@ -31,6 +31,7 @@ import {
 import {
   toTaskSummary,
   toTaskDetail,
+  CALL_LANGUAGE_QUESTION_ID,
   getTaskForUser,
   getSettings,
   ensureSettings,
@@ -40,6 +41,7 @@ import {
   newId,
   type OrchestratorContext,
 } from '@dial/orchestrator';
+import { resolveLanguageAnswer } from '@dial/domain';
 import { logger, metricsSnapshot, incrementCounter } from '@dial/observability';
 import {
   registerUser,
@@ -361,12 +363,27 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       if (value) answers[entry.id] = value;
     }
 
+    /*
+     * The language question is asked once the search is done, so answering it
+     * must not throw that work away. Resuming at interpretation would re-run
+     * the model and the whole directory search to reach a decision already
+     * made; the answer only changes how the calls are spoken.
+     */
+    const languageAnswer = answers[CALL_LANGUAGE_QUESTION_ID];
+    const chosenLanguage = languageAnswer
+      ? resolveLanguageAnswer(languageAnswer, row.countryCode)
+      : null;
+    const resumeAtCalling = Boolean(languageAnswer) && row.discoveredCount > 0;
+
     await db
       .update(tasks)
       .set({
         clarifyingAnswers: answers,
         clarifyingQuestions: [],
-        state: 'created',
+        // Unrecognised free text leaves the saved preference in place rather
+        // than having Dial open a call in a language nobody asked for.
+        ...(chosenLanguage ? { callLanguage: chosenLanguage } : {}),
+        state: resumeAtCalling ? 'candidates_ready' : 'created',
         updatedAt: new Date().toISOString(),
       })
       .where(eq(tasks.id, id));
@@ -375,7 +392,11 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       answered: Object.keys(answers).length,
     });
 
-    await enqueueJob(db, 'task.interpret', { taskId: id }, { dedupeKey: `interpret:${id}:${Date.now()}` });
+    if (resumeAtCalling) {
+      await enqueueJob(db, 'task.plan_calls', { taskId: id }, { dedupeKey: `plan:${id}:${Date.now()}` });
+    } else {
+      await enqueueJob(db, 'task.interpret', { taskId: id }, { dedupeKey: `interpret:${id}:${Date.now()}` });
+    }
 
     const rows = await db.select().from(tasks).where(eq(tasks.id, id)).limit(1);
     return toTaskDetail(db, rows[0]!);

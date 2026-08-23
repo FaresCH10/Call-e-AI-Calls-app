@@ -26,6 +26,11 @@ import {
   isValidE164,
   isBlockedNumber,
   shouldAskClarification,
+  primaryLanguageForCountry,
+  normalizeLanguageCode,
+  languageOptions,
+  describeLanguage,
+  englishNameOf,
 } from '@dial/domain';
 import { buildCallBrief, callIdempotencyKey, ProviderError, isTerminal } from '@dial/calle';
 import {
@@ -325,6 +330,12 @@ export function placeFromAnswers(answers: Record<string, string>): string | null
 }
 
 /**
+ * The id of the language question, shared with the endpoint that receives the
+ * answer so neither side has to guess the other's spelling.
+ */
+export const CALL_LANGUAGE_QUESTION_ID = 'call_language';
+
+/**
  * Below this many callable businesses, the first search is not worth acting on
  * and it is cheaper to widen than to ring the one shop that listed a number.
  */
@@ -541,7 +552,7 @@ export async function handleResearch(
   const callable = ranked.filter((r) => !r.excludedReason).length;
   await ctx.db
     .update(tasks)
-    .set({ discoveredCount: outcome.candidates.length })
+    .set({ discoveredCount: outcome.candidates.length, countryCode })
     .where(eq(tasks.id, task.id));
 
   await setState(
@@ -561,7 +572,77 @@ export async function handleResearch(
     return;
   }
 
+  // Which language to speak, asked now because this is the first moment the
+  // country is known and there is something worth calling.
+  if (await askCallLanguage(ctx, task.id, countryCode, task.callLanguage, settings.callingLanguage)) {
+    return;
+  }
+
   await enqueueJob(ctx.db, 'task.plan_calls', { taskId: task.id }, { dedupeKey: `plan:${task.id}` });
+}
+
+/**
+ * Offers the language for this task's calls, the country's own language first.
+ *
+ * Only asked when there is something to decide. If the user's saved language is
+ * already the one spoken where Dial is calling, the answer is not in doubt and
+ * a question would be pure friction -- Dial says which language it will use and
+ * gets on with it.
+ *
+ * Returns true when the task has been parked on the question.
+ */
+async function askCallLanguage(
+  ctx: OrchestratorContext,
+  taskId: string,
+  countryCode: string | null,
+  alreadyChosen: string | null,
+  savedLanguage: string,
+): Promise<boolean> {
+  if (alreadyChosen) return false;
+
+  const primary = primaryLanguageForCountry(countryCode);
+  const saved = normalizeLanguageCode(savedLanguage) ?? 'en';
+
+  // Nothing to weigh up: the saved language is the local one, or the country is
+  // unknown so there is no recommendation to offer.
+  if (!primary || primary === saved) {
+    if (primary) {
+      await addEvent(
+        ctx,
+        taskId,
+        'candidates_ready',
+        `Calling in ${englishNameOf(primary)}.`,
+      );
+    }
+    return false;
+  }
+
+  const options = languageOptions(countryCode, [saved]);
+  const recommended = options.find((o) => o.recommended) ?? options[0]!;
+
+  await ctx.db
+    .update(tasks)
+    .set({
+      clarifyingQuestions: [
+        {
+          id: CALL_LANGUAGE_QUESTION_ID,
+          question: 'Which language should Dial speak on these calls?',
+          why: `${englishNameOf(primary)} is the main language where Dial is calling.`,
+          options: options.map(describeLanguage),
+          required: false,
+        },
+      ],
+    })
+    .where(eq(tasks.id, taskId));
+
+  await setState(
+    ctx,
+    taskId,
+    'needs_user_input',
+    `Which language should Dial speak? ${describeLanguage(recommended)}`,
+  );
+  incrementCounter('task.call_language_asked');
+  return true;
 }
 
 /* ------------------------------------------------------------ plan calls */
@@ -769,7 +850,8 @@ export async function handleDispatchWave(
         metadata: { dial_task_id: task.id, dial_call_id: call.id },
         idempotencyKey: call.idempotencyKey,
         ...(ctx.config.calle.webhookUrl ? { webhookUrl: ctx.config.calle.webhookUrl } : {}),
-        locale: settings.callingLanguage,
+        // What the user chose for this task, or their standing preference.
+        locale: task.callLanguage ?? settings.callingLanguage,
       });
 
       await ctx.db
