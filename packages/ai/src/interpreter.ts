@@ -155,6 +155,18 @@ const OUTPUT_SCHEMA: Schema = {
       type: Type.STRING,
       description: 'Short phrase to search a business directory with, e.g. "phone repair shop".',
     },
+    callPurpose: nullable({
+      type: Type.STRING,
+      description:
+        'What the user wants from the person named, e.g. "check whether they have ice cream". ' +
+        'Null when the request does not say what the call is for.',
+    }),
+    calleeName: nullable({
+      type: Type.STRING,
+      description:
+        'The name of a specific person or named party the user wants called, e.g. "Malik". ' +
+        'Null when the request describes a kind of business rather than naming someone.',
+    }),
     successCondition: {
       type: Type.STRING,
       description: 'What would make this task complete.',
@@ -221,6 +233,8 @@ const OUTPUT_SCHEMA: Schema = {
     'callFamily',
     'domain',
     'searchQuery',
+    'calleeName',
+    'callPurpose',
     'successCondition',
     'requestedSideEffect',
     'sensitivity',
@@ -250,6 +264,8 @@ const OUTPUT_SCHEMA: Schema = {
     'callFamily',
     'domain',
     'searchQuery',
+    'calleeName',
+    'callPurpose',
     'successCondition',
     'requestedSideEffect',
     'sensitivity',
@@ -297,6 +313,9 @@ How to decide the fields:
 - clarificationNeeded: almost always null. Dial's promise is that the user does not get interrogated. Ask ONLY when proceeding is unsafe or the task is impossible without the answer — for example a purchase with no stated budget, or a medical request with no named pharmacy. Do NOT ask for things you can reasonably default: search radius, how many businesses to call, or a time when the user said "tonight".
 
 - Resolve relative dates and times against the current date and time given to you.
+- calleeName: set it when the request names who to call rather than describing a kind of business — "call Malik", "ring my landlord", "phone Dr Hassan". Use the name as the user wrote it. Null when the user is describing a business to find ("a phone repair shop", "the cheapest plumber").
+- When calleeName is set the user is not asking Dial to search for anything, so leave locationText null and do not ask where.
+- callPurpose: what the user wants from the person, in a few words — "check whether they have ice cream", "ask if the car is ready". Null when the request does not say. A vague reply is not a purpose: "idk", "whatever", "just call them", "you decide" and similar all mean null. Only set it when you could tell the person on the phone what is being asked of them.
 - Do not invent a location. If the user said nothing about where, leave locationText null.
 - Put device models, fault descriptions, party details and similar specifics into "additional" as key/value pairs.
 - Use null for anything the request does not specify. Do not guess.
@@ -447,6 +466,8 @@ export function toDialTask(raw: Record<string, unknown>): InterpretOutput {
     taskFamily: raw['taskFamily'],
     domain: str(raw['domain']) ?? 'general',
     searchQuery: str(raw['searchQuery']) ?? str(raw['domain']) ?? 'business',
+    calleeName: str(raw['calleeName']),
+    callPurpose: str(raw['callPurpose']),
     location: locationText
       ? {
           raw: locationText,

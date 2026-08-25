@@ -144,7 +144,9 @@ describe('the full task pipeline', () => {
   it('respects the per-task call ceiling', async () => {
     await h.close();
     h = await createHarness({
-      env: { MAX_CALLS_PER_TASK: '2' },
+      // Both bounds: the first is how many Dial plans up front, the second is
+      // how far it will go while the goal is still unmet.
+      env: { MAX_CALLS_PER_TASK: '2', MAX_CALLS_UNTIL_RESULT: '2' },
       discovery: stubDiscovery({
         candidates: Array.from({ length: 8 }, (_, i) =>
           candidate({ id: `x${i}`, name: `Shop ${i}`, phoneE164: `+3531679350${i}` }),

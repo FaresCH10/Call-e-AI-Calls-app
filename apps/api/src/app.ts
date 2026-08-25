@@ -11,6 +11,7 @@ import {
   userSettings,
   authorizationRequests,
   calls,
+  contacts,
   enqueueJob,
   queueDepth,
   type Db,
@@ -20,6 +21,10 @@ import {
   signInRequestSchema,
   createTaskRequestSchema,
   answerClarificationRequestSchema,
+  actOnBusinessRequestSchema,
+  callCandidateRequestSchema,
+  createContactRequestSchema,
+  renameContactRequestSchema,
   answerQuestionsRequestSchema,
   authorizationDecisionRequestSchema,
   updateSettingsRequestSchema,
@@ -32,6 +37,8 @@ import {
   toTaskSummary,
   toTaskDetail,
   CALL_LANGUAGE_QUESTION_ID,
+  listCandidates,
+  callCandidateNow,
   getTaskForUser,
   getSettings,
   ensureSettings,
@@ -41,7 +48,12 @@ import {
   newId,
   type OrchestratorContext,
 } from '@dial/orchestrator';
-import { resolveLanguageAnswer } from '@dial/domain';
+import {
+  resolveLanguageAnswer,
+  normalizePhone,
+  isValidE164,
+  isBlockedNumber,
+} from '@dial/domain';
 import { logger, metricsSnapshot, incrementCounter } from '@dial/observability';
 import {
   registerUser,
@@ -373,7 +385,17 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     const chosenLanguage = languageAnswer
       ? resolveLanguageAnswer(languageAnswer, row.countryCode)
       : null;
-    const resumeAtCalling = Boolean(languageAnswer) && row.discoveredCount > 0;
+    /*
+     * Resume where the question was asked, not where the task began.
+     *
+     * Keyed on which question was outstanding rather than on whether it was
+     * answered: skipping the language question is a decision too, and starting
+     * the whole task again -- re-running the model and the entire search to
+     * reach a conclusion already reached -- is not what "skip" should mean.
+     */
+    const askedQuestions = (row.clarifyingQuestions as Array<{ id: string }>) ?? [];
+    const wasLanguageQuestion = askedQuestions.some((q) => q.id === CALL_LANGUAGE_QUESTION_ID);
+    const resumeAtCalling = wasLanguageQuestion && row.discoveredCount > 0;
 
     await db
       .update(tasks)
@@ -397,6 +419,116 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     } else {
       await enqueueJob(db, 'task.interpret', { taskId: id }, { dedupeKey: `interpret:${id}:${Date.now()}` });
     }
+
+    const rows = await db.select().from(tasks).where(eq(tasks.id, id)).limit(1);
+    return toTaskDetail(db, rows[0]!);
+  });
+
+  /**
+   * Calls a business the user chose from the list Dial found.
+   *
+   * Dial rings the ones it ranked highest, and a ranking can be wrong -- the
+   * user sees the whole list and may know something it does not.
+   */
+  /**
+   * Rings a business back to do something: make the appointment, place the
+   * order, whatever the user asks for.
+   *
+   * Starts a new task rather than extending this one. The original was a
+   * question and this is a commitment, so it is interpreted from scratch --
+   * its side effect, sensitivity and authorization requirement all worked out
+   * afresh, and gated by the user's policy exactly as the same request typed
+   * into the box would be.
+   */
+  app.post('/api/tasks/:id/act-on-business', async (request, reply) => {
+    const user = requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params as { id: string };
+    const parsed = actOnBusinessRequestSchema.safeParse(request.body);
+    if (!parsed.success) return fail(reply, 400, 'invalid_request', firstIssue(parsed.error));
+
+    const row = await getTaskForUser(db, id, user.id);
+    if (!row) return fail(reply, 404, 'not_found', 'That task does not exist.');
+    if (!ctx.interpreter) {
+      return fail(
+        reply,
+        503,
+        'llm_not_configured',
+        'Dial cannot understand requests until a language model is configured on the server.',
+      );
+    }
+
+    const ranked = await listCandidates(db, id);
+    const chosen = ranked.find((r) => r.candidate.id === parsed.data.candidateId);
+    if (!chosen) return fail(reply, 404, 'not_found', 'That business is not part of this task.');
+
+    const phone = chosen.candidate.phoneE164;
+    if (!phone) {
+      return fail(
+        reply,
+        409,
+        'no_phone',
+        `Dial has no number it can dial for ${chosen.candidate.name}.`,
+      );
+    }
+
+    const followUpId = newId('task');
+    await db.insert(tasks).values({
+      id: followUpId,
+      userId: user.id,
+      instruction: parsed.data.instruction,
+      state: 'created',
+      // The business is already known, so this rings it rather than searching.
+      directPhone: phone,
+      latitude: row.latitude,
+      longitude: row.longitude,
+      locationLabel: row.locationLabel,
+      countryCode: row.countryCode,
+      callLanguage: row.callLanguage,
+      idempotencyKey: `act-${id}-${parsed.data.candidateId}-${Date.now()}`,
+    });
+
+    hub.registerTaskOwner(followUpId, user.id);
+    await enqueueJob(db, 'task.interpret', { taskId: followUpId }, {
+      dedupeKey: `interpret:${followUpId}`,
+      maxAttempts: 8,
+    });
+    await audit(db, user.id, followUpId, 'act_on_business', {
+      fromTaskId: id,
+      candidateId: parsed.data.candidateId,
+    });
+    incrementCounter('task.act_on_business');
+
+    const rows = await db.select().from(tasks).where(eq(tasks.id, followUpId)).limit(1);
+    return toTaskSummary(rows[0]!);
+  });
+
+  app.post('/api/tasks/:id/call-candidate', async (request, reply) => {
+    const user = requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params as { id: string };
+    const parsed = callCandidateRequestSchema.safeParse(request.body);
+    if (!parsed.success) return fail(reply, 400, 'invalid_request', firstIssue(parsed.error));
+
+    const row = await getTaskForUser(db, id, user.id);
+    if (!row) return fail(reply, 404, 'not_found', 'That task does not exist.');
+
+    const result = await callCandidateNow(ctx, id, parsed.data.candidateId);
+    if (!result.ok) {
+      const status =
+        result.refusal === 'task_not_found' || result.refusal === 'candidate_not_found'
+          ? 404
+          : result.refusal === 'budget_exhausted'
+            ? 429
+            : result.refusal === 'not_authorized'
+              ? 403
+              : 409;
+      return fail(reply, status, result.refusal, result.reason);
+    }
+
+    await audit(db, user.id, id, 'call_requested_by_user', {
+      candidateId: parsed.data.candidateId,
+    });
 
     const rows = await db.select().from(tasks).where(eq(tasks.id, id)).limit(1);
     return toTaskDetail(db, rows[0]!);
@@ -501,6 +633,104 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
   });
 
   /* -------------------------------------------------------------- settings */
+
+  /* ------------------------------------------------------------- contacts */
+
+  app.get('/api/contacts', async (request, reply) => {
+    const user = requireUser(request, reply);
+    if (!user) return;
+    const rows = await db
+      .select()
+      .from(contacts)
+      .where(eq(contacts.userId, user.id))
+      .orderBy(contacts.name);
+    return {
+      contacts: rows.map((c) => ({
+        id: c.id,
+        name: c.name,
+        phoneE164: c.phoneE164,
+        createdAt: c.createdAt,
+      })),
+    };
+  });
+
+  /**
+   * Keeps a number. Either given outright, or taken from a task -- the latter
+   * so a raw number never travels to the client and back just to be stored.
+   */
+  app.post('/api/contacts', async (request, reply) => {
+    const user = requireUser(request, reply);
+    if (!user) return;
+    const parsed = createContactRequestSchema.safeParse(request.body);
+    if (!parsed.success) return fail(reply, 400, 'invalid_request', firstIssue(parsed.error));
+    const body = parsed.data;
+
+    let phoneE164: string | null = null;
+    if (body.taskId) {
+      const row = await getTaskForUser(db, body.taskId, user.id);
+      if (!row) return fail(reply, 404, 'not_found', 'That task does not exist.');
+      phoneE164 = row.directPhone;
+      if (!phoneE164) {
+        return fail(reply, 409, 'no_number', 'That task did not use a number you gave.');
+      }
+    } else {
+      const normalized = normalizePhone(body.phone ?? null, null);
+      if (!normalized || !isValidE164(normalized.e164)) {
+        return fail(reply, 400, 'invalid_request', 'That does not look like a phone number.');
+      }
+      if (isBlockedNumber(normalized.e164)) {
+        return fail(reply, 400, 'blocked_number', 'Dial will not store that number.');
+      }
+      phoneE164 = normalized.e164;
+    }
+
+    const id = newId('contact');
+    // Saving a number already kept renames it rather than duplicating it.
+    const [saved] = await db
+      .insert(contacts)
+      .values({ id, userId: user.id, name: body.name, phoneE164 })
+      .onConflictDoUpdate({
+        target: [contacts.userId, contacts.phoneE164],
+        set: { name: body.name, updatedAt: new Date().toISOString() },
+      })
+      .returning();
+
+    await audit(db, user.id, body.taskId ?? null, 'contact_saved', { contactId: saved?.id });
+    return { id: saved!.id, name: saved!.name, phoneE164: saved!.phoneE164, createdAt: saved!.createdAt };
+  });
+
+  app.patch('/api/contacts/:id', async (request, reply) => {
+    const user = requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params as { id: string };
+    const parsed = renameContactRequestSchema.safeParse(request.body);
+    if (!parsed.success) return fail(reply, 400, 'invalid_request', firstIssue(parsed.error));
+
+    const [updated] = await db
+      .update(contacts)
+      .set({ name: parsed.data.name, updatedAt: new Date().toISOString() })
+      .where(and(eq(contacts.id, id), eq(contacts.userId, user.id)))
+      .returning();
+    if (!updated) return fail(reply, 404, 'not_found', 'That contact does not exist.');
+    return {
+      id: updated.id,
+      name: updated.name,
+      phoneE164: updated.phoneE164,
+      createdAt: updated.createdAt,
+    };
+  });
+
+  app.delete('/api/contacts/:id', async (request, reply) => {
+    const user = requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params as { id: string };
+    const [removed] = await db
+      .delete(contacts)
+      .where(and(eq(contacts.id, id), eq(contacts.userId, user.id)))
+      .returning({ id: contacts.id });
+    if (!removed) return fail(reply, 404, 'not_found', 'That contact does not exist.');
+    return { ok: true };
+  });
 
   app.get('/api/settings', async (request, reply) => {
     const user = requireUser(request, reply);

@@ -53,6 +53,19 @@ export interface CallFamily {
   priceField: string | null;
   /** Which field says whether the business can actually help. */
   viabilityField: string | null;
+  /**
+   * Whether "no" on the viability field means *no answer was obtained*, rather
+   * than *the answer is no*.
+   *
+   * The distinction is easy to miss and changes everything. `can_repair: "no"`
+   * is a real answer -- this shop cannot fix it, and the user learned something.
+   * `question_answered: "no"` is the opposite: nothing was learned at all.
+   *
+   * Reading the second as the first meant a call where the business said only
+   * "Oui, Allô ?" and hung up was filed as a useful answer, counted towards
+   * the comparison, and could be presented as the best verified option.
+   */
+  viabilityAsksWhetherAnswered?: boolean;
 }
 
 function objectSchema(properties: Record<string, JsonSchema>, required: string[]): JsonSchema {
@@ -334,6 +347,7 @@ export const CALL_FAMILIES: Record<CallFamilyId, CallFamily> = {
     parse: makeParser(zStatusCheck),
     priceField: null,
     viabilityField: 'status_known',
+    viabilityAsksWhetherAnswered: true,
   },
   general_inquiry: {
     id: 'general_inquiry',
@@ -342,6 +356,7 @@ export const CALL_FAMILIES: Record<CallFamilyId, CallFamily> = {
     parse: makeParser(zGeneralInquiry),
     priceField: null,
     viabilityField: 'question_answered',
+    viabilityAsksWhetherAnswered: true,
   },
 };
 

@@ -51,9 +51,12 @@ const rawSchema = z.object({
   CORS_ORIGINS: z.string().default('http://localhost:3000'),
 
   MAX_CALLS_PER_TASK: int(5),
+  MAX_CALLS_UNTIL_RESULT: int(10),
+  COMPARABLE_TARGET: int(3),
+  TASK_STALL_TIMEOUT_MS: int(15 * 60_000),
   MAX_CALL_CONCURRENCY: int(3),
   MAX_CALLS_PER_USER_PER_DAY: int(25),
-  CALL_WAVE_SIZE: int(3),
+  CALL_WAVE_SIZE: int(1),
   CALL_POLL_DELAY_MS: int(20000),
   CALL_ANSWER_TIMEOUT_MS: int(30000),
   CALL_MAX_ATTEMPTS_PER_BUSINESS: int(2),
@@ -92,8 +95,52 @@ export interface DialConfig {
   corsOrigins: string[];
   limits: {
     maxCallsPerTask: number;
+    /**
+     * The ceiling while Dial is still trying to get *any* usable answer.
+     *
+     * Higher than the ordinary one on purpose. Five calls is enough when they
+     * are producing results; when none of them has, stopping at five hands the
+     * user nothing and leaves ninety businesses untried. This is the point
+     * where Dial gives up rather than the point where it stops out of thrift.
+     */
+    maxCallsUntilResult: number;
+    /**
+     * How many businesses must give a comparable answer before Dial has done
+     * the job and stops.
+     *
+     * This is the goal, not a budget. Stopping at two meant a task could end
+     * after three calls with a "comparison" between two shops, which is a
+     * thin basis for "the cheapest". A request that names its own number --
+     * "ring five places" -- overrides it.
+     */
+    comparableTarget: number;
+    /**
+     * How long a task may go with nothing happening before Dial gives up on it.
+     *
+     * A stall, not a deadline. It used to be a fixed fifteen minutes from the
+     * first call, which was fine when Dial rang three businesses at once and
+     * fatal once it rang them one at a time: six businesses were marked failed
+     * having never been dialled, because the clock ran out while the queue was
+     * still working through them properly.
+     */
+    stallTimeoutMs: number;
+    /**
+     * How many queue jobs a worker processes at once. Not calls: interpreting,
+     * searching and polling all run through the same queue, and throttling
+     * those would only make every task slower. Concurrent *calls* are governed
+     * by callWaveSize.
+     */
     maxCallConcurrency: number;
     maxCallsPerUserPerDay: number;
+    /**
+     * How many businesses Dial rings at the same time.
+     *
+     * One, by default, and deliberately. Three phones ringing at once is three
+     * real people interrupted for a question that the first of them may well
+     * have answered -- and the user watching sees a row of calls in flight with
+     * no idea which will come back. Sequential is slower and is what somebody
+     * making these calls themselves would do.
+     */
     callWaveSize: number;
     /** How long to wait before first asking the provider for a result. */
     pollDelayMs: number;
@@ -188,6 +235,9 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): DialConfig 
     corsOrigins: raw.CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean),
     limits: {
       maxCallsPerTask: raw.MAX_CALLS_PER_TASK,
+      maxCallsUntilResult: Math.max(raw.MAX_CALLS_UNTIL_RESULT, raw.MAX_CALLS_PER_TASK),
+      comparableTarget: raw.COMPARABLE_TARGET,
+      stallTimeoutMs: raw.TASK_STALL_TIMEOUT_MS,
       maxCallConcurrency: raw.MAX_CALL_CONCURRENCY,
       maxCallsPerUserPerDay: raw.MAX_CALLS_PER_USER_PER_DAY,
       callWaveSize: raw.CALL_WAVE_SIZE,

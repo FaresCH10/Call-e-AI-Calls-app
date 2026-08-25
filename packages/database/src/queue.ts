@@ -102,9 +102,25 @@ export async function claimJobs(db: Db, workerId: string, limit = 1): Promise<Qu
   }));
 }
 
+/**
+ * Marks a job done and releases its dedupe slot.
+ *
+ * Releasing matters as much as the state change. A dedupe key means "do not
+ * queue this twice while one is outstanding", but the unique index covers every
+ * row regardless of state, so a completed job held its key forever and the same
+ * work could never be queued again.
+ *
+ * That stranded tasks. Answering a question after the search had run
+ * re-interpreted the task, which tried to enqueue `research:<taskId>` a second
+ * time; the insert was silently dropped, no job ever ran, and the task sat in
+ * `interpreting` with the progress list reading "Understanding request" and
+ * nothing after it.
+ */
 export async function completeJob(db: Db, id: string): Promise<void> {
   await db.execute(sql`
-    UPDATE jobs SET state = 'completed', completed_at = now(), locked_by = NULL WHERE id = ${id}
+    UPDATE jobs
+    SET state = 'completed', completed_at = now(), locked_by = NULL, dedupe_key = NULL
+    WHERE id = ${id}
   `);
   incrementCounter('queue.completed');
 }
@@ -121,7 +137,13 @@ export async function failJob(db: Db, job: QueuedJob, error: unknown): Promise<'
 
   if (dead) {
     await db.execute(sql`
-      UPDATE jobs SET state = 'failed', last_error = ${message.slice(0, 2000)}, locked_by = NULL
+      UPDATE jobs
+      SET state = 'failed',
+          last_error = ${message.slice(0, 2000)},
+          locked_by = NULL,
+          -- Same reason as completion: a dead job must not hold the slot
+          -- against a later, legitimate attempt at the same work.
+          dedupe_key = NULL
       WHERE id = ${job.id}
     `);
     incrementCounter('queue.dead', { kind: job.kind });

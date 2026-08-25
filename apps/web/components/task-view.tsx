@@ -53,6 +53,11 @@ function toneStyle(tone: string): React.CSSProperties {
 export function TaskView({ initial }: { initial: TaskDetail }) {
   const [task, setTask] = useState<TaskDetail>(initial);
   const [busy, setBusy] = useState(false);
+  const [contactName, setContactName] = useState('');
+  // The business the user has asked Dial to ring back, and what for.
+  const [actOn, setActOn] = useState<ComparableOutcome['candidate'] | null>(null);
+  const [actInstruction, setActInstruction] = useState('');
+  const called = new Set(task.calls.map((c) => c.candidateId));
   const [error, setError] = useState<string | null>(null);
   const [answer, setAnswer] = useState('');
   const [gone, setGone] = useState(false);
@@ -233,6 +238,96 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
         </section>
       ) : null}
 
+      {/*
+        Offered only when the user supplied the number and has not kept it. The
+        number never travels back to the server -- the task already holds it, so
+        saving refers to the task.
+      */}
+      {task.directPhone && !task.directPhoneSaved ? (
+        <section className="card">
+          <div className="card-label">Keep this number?</div>
+          <p style={{ marginTop: 0, color: 'var(--color-text-secondary)' }}>
+            Give {task.directPhone} a name and Dial will use it next time instead of the bare
+            number.
+          </p>
+          <div className="field">
+            <label htmlFor="save-contact">Name</label>
+            <input
+              id="save-contact"
+              value={contactName}
+              onChange={(event) => setContactName(event.target.value)}
+              placeholder="Ahmed at the garage"
+              maxLength={80}
+            />
+          </div>
+          <div className="button-row">
+            <button
+              className="button"
+              data-variant="primary"
+              disabled={busy || !contactName.trim()}
+              onClick={() =>
+                void act(() => proxied.saveContact({ taskId: task.id, name: contactName.trim() }))
+              }
+            >
+              Save to contacts
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      {/*
+        Dial found this business, rang it and got an answer. Asking the user to
+        pick the phone up themselves to act on that answer wastes the thing that
+        was just established -- so Dial rings back, and the user says what for.
+      */}
+      {actOn ? (
+        <section className="card">
+          <div className="card-label">Have Dial call {actOn.name}</div>
+          <div className="field">
+            <label htmlFor="act-instruction">What should Dial do?</label>
+            <input
+              id="act-instruction"
+              value={actInstruction}
+              onChange={(event) => setActInstruction(event.target.value)}
+              placeholder="Book me in for tomorrow morning"
+              maxLength={500}
+              autoFocus
+            />
+          </div>
+          <div className="button-row">
+            <button
+              className="button"
+              data-variant="primary"
+              disabled={busy || !actInstruction.trim()}
+              onClick={() =>
+                void act(async () => {
+                  const started = (await proxied.actOnBusiness(
+                    task.id,
+                    actOn.id,
+                    actInstruction.trim(),
+                  )) as { id: string };
+                  router.push(`/tasks/${started.id}`);
+                  return started;
+                }, { refreshAfter: false })
+              }
+            >
+              Ask Dial to call
+            </button>
+            <button
+              type="button"
+              className="button"
+              disabled={busy}
+              onClick={() => {
+                setActOn(null);
+                setActInstruction('');
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </section>
+      ) : null}
+
       {/* Anything needing the user comes first — it is blocking the work. */}
       {task.state === 'needs_user_input' && task.clarificationQuestion ? (
         <section className="card">
@@ -314,7 +409,9 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
       ) : null}
 
       {/* The answer */}
-      {result?.best ? <BestResult outcome={result.best} tally={result.tally} /> : null}
+      {result?.best ? (
+        <BestResult outcome={result.best} tally={result.tally} onAct={setActOn} />
+      ) : null}
 
       {result && result.caveats.length > 0 ? (
         <div className="notice" data-tone="warning">
@@ -327,9 +424,25 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
         </div>
       ) : null}
 
-      {result && result.alternatives.length > 0 ? (
+      {result && (result.best || result.alternatives.length > 0 || result.unusable.length > 0) ? (
         <section className="card">
           <div className="card-label">Compared</div>
+          {/*
+            Everything Dial rang and got something from, including the ones it
+            could not compare. Showing only the winner would hide how thin or
+            how solid the basis for choosing it was.
+          */}
+          <p style={{ marginTop: 0, color: 'var(--color-text-secondary)' }}>
+            {result.tally.comparable === 0
+              ? 'Nothing comparable came back.'
+              : result.tally.comparable === 1
+                ? 'Only one business gave a comparable answer, so there was nothing to weigh it against.'
+                : `Dial compared ${result.tally.comparable} businesses that gave a usable answer` +
+                  (result.best ? ` and picked ${result.best.candidate.name}.` : '.')}
+            {result.best && result.best.rankReasons.length > 0
+              ? ` ${result.best.rankReasons.join(' · ')}.`
+              : ''}
+          </p>
           <div className="table-scroll">
             <table className="comparison-table">
               <thead>
@@ -338,10 +451,11 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
                   <th scope="col">Price</th>
                   <th scope="col">Notes</th>
                   <th scope="col">Distance</th>
+                  <th scope="col" aria-label="Act" />
                 </tr>
               </thead>
               <tbody>
-                {[result.best, ...result.alternatives]
+                {[result.best, ...result.alternatives, ...result.unusable]
                   .filter((o): o is ComparableOutcome => Boolean(o))
                   .map((outcome) => (
                     <tr key={outcome.callId}>
@@ -350,6 +464,11 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
                         {outcome.normalizedPrice !== null
                           ? `${outcome.normalizedCurrency ?? ''} ${outcome.normalizedPrice.toFixed(2)}`
                           : 'Not quoted'}
+                        {!outcome.viable ? (
+                          <div style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>
+                            Not comparable
+                          </div>
+                        ) : null}
                       </td>
                       <td>
                         {outcome.highlights.slice(0, 3).join(' · ') || '—'}
@@ -363,6 +482,22 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
                         {outcome.candidate.distanceMeters !== null
                           ? `${(outcome.candidate.distanceMeters / 1000).toFixed(1)} km`
                           : '—'}
+                      </td>
+                      <td>
+                        {/*
+                          Any business that answered can be acted on, not only
+                          the one that came top: cheapest is not always wanted.
+                        */}
+                        {outcome.candidate.phoneE164 ? (
+                          <button
+                            type="button"
+                            className="button"
+                            disabled={busy}
+                            onClick={() => setActOn(outcome.candidate)}
+                          >
+                            Have Dial call
+                          </button>
+                        ) : null}
                       </td>
                     </tr>
                   ))}
@@ -446,6 +581,7 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
                   <th scope="col">Business</th>
                   <th scope="col">Source</th>
                   <th scope="col">Why / why not</th>
+                  <th scope="col" aria-label="Call" />
                 </tr>
               </thead>
               <tbody>
@@ -475,6 +611,29 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
                     </td>
                     <td style={{ color: 'var(--color-text-secondary)' }}>
                       {entry.excludedReason ?? entry.reasons.join(' · ') ?? '—'}
+                    </td>
+                    <td>
+                      {/*
+                        Dial rings the ones it ranked highest, which is a
+                        judgement and can be wrong. The user sees the whole
+                        list, so let them override it.
+                      */}
+                      {entry.candidate.phoneE164 ? (
+                        called.has(entry.candidate.id) ? (
+                          <span style={{ color: 'var(--color-text-muted)' }}>Called</span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="button"
+                            disabled={busy}
+                            onClick={() =>
+                              void act(() => proxied.callCandidate(task.id, entry.candidate.id))
+                            }
+                          >
+                            Call this one
+                          </button>
+                        )
+                      ) : null}
                     </td>
                   </tr>
                 ))}
@@ -527,9 +686,11 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
 function BestResult({
   outcome,
   tally,
+  onAct,
 }: {
   outcome: ComparableOutcome;
   tally: TaskDetail['result'] extends infer R ? (R extends { tally: infer T } ? T : never) : never;
+  onAct: (candidate: ComparableOutcome['candidate']) => void;
 }) {
   const mapsUrl =
     outcome.candidate.latitude !== null && outcome.candidate.longitude !== null
@@ -570,6 +731,17 @@ function BestResult({
       </p>
 
       <div className="button-row">
+        {outcome.candidate.phoneE164 ? (
+          <button
+            type="button"
+            className="button"
+            data-variant="primary"
+            onClick={() => onAct(outcome.candidate)}
+          >
+            <PhoneIcon size={18} />
+            Have Dial call them
+          </button>
+        ) : null}
         {outcome.candidate.phoneE164 ? (
           <a className="button" href={`tel:${outcome.candidate.phoneE164}`}>
             <PhoneIcon size={18} />

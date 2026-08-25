@@ -82,6 +82,25 @@ export const dialTaskSchema = z.object({
   domain: z.string().min(1).max(60),
   /** The search phrase to hand the discovery layer, e.g. "phone repair shop". */
   searchQuery: z.string().min(1).max(200),
+  /**
+   * Who to call, when the request names somebody rather than describing a kind
+   * of business -- "call Malik", "ring the landlord".
+   *
+   * This is the difference between a search and a lookup. Handed "call Malik"
+   * with no way to express it, the interpreter has to pretend Malik is a
+   * business category, and the pipeline then asks which city to search for him
+   * in.
+   */
+  calleeName: z.string().max(80).nullable().default(null),
+  /**
+   * What the user wants from the person they named, when they said.
+   *
+   * Needed only for a call to somebody Dial already has a number for. A search
+   * carries its own purpose -- "the cheapest screen repair" says what the call
+   * is for -- but "call Malik" says who to ring and nothing about what to say
+   * when he answers.
+   */
+  callPurpose: z.string().max(300).nullable().default(null),
   location: locationConstraintSchema.nullable().default(null),
   constraints: taskConstraintsSchema,
   successCondition: z.string().min(1).max(400),

@@ -7,6 +7,7 @@ import type {
   UserSettings,
   HealthResponse,
   CreateTaskRequest,
+  Contact,
 } from '@dial/schemas';
 
 /**
@@ -145,6 +146,50 @@ export class DialApiClient {
       method: 'POST',
       body: JSON.stringify({ answers, skipped }),
     });
+  }
+
+  /**
+   * Asks Dial to ring a business back and do something -- make the
+   * appointment, place the order. Returns the new task it started.
+   */
+  actOnBusiness(taskId: string, candidateId: string, instruction: string): Promise<TaskSummary> {
+    return this.request(`/api/tasks/${encodeURIComponent(taskId)}/act-on-business`, {
+      method: 'POST',
+      body: JSON.stringify({ candidateId, instruction }),
+    });
+  }
+
+  /** Calls one business the user picked out of the list Dial found. */
+  callCandidate(taskId: string, candidateId: string): Promise<TaskDetail> {
+    return this.request(`/api/tasks/${encodeURIComponent(taskId)}/call-candidate`, {
+      method: 'POST',
+      body: JSON.stringify({ candidateId }),
+    });
+  }
+
+  /* Contacts: numbers the user chose to keep. */
+
+  listContacts(): Promise<{ contacts: Contact[] }> {
+    return this.request('/api/contacts');
+  }
+
+  /**
+   * Keeps a number. Pass `taskId` to save the number a task used, so the raw
+   * number never has to travel back to the client and in again.
+   */
+  saveContact(input: { name: string; phone?: string; taskId?: string }): Promise<Contact> {
+    return this.request('/api/contacts', { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  renameContact(id: string, name: string): Promise<Contact> {
+    return this.request(`/api/contacts/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    });
+  }
+
+  deleteContact(id: string): Promise<{ ok: boolean }> {
+    return this.request(`/api/contacts/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
   decideAuthorization(id: string, approved: boolean): Promise<TaskDetail> {

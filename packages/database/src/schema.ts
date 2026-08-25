@@ -73,6 +73,35 @@ export const userSettings = pgTable('user_settings', {
 });
 
 /** Registered push tokens, so a completed task can notify the right device. */
+/**
+ * Numbers the user has chosen to keep, so a number typed once does not have to
+ * be typed again. Renaming is the point: "+971 56 341 8581" tells you nothing
+ * a month later, "Ahmed at the garage" tells you everything.
+ */
+export const contacts = pgTable(
+  'contacts',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    phoneE164: text('phone_e164').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    // One entry per number per user: saving the same number twice is a rename,
+    // not a second contact.
+    uniquePhone: uniqueIndex('contacts_user_phone').on(t.userId, t.phoneE164),
+    userIdx: index('contacts_user_idx').on(t.userId, t.name),
+  }),
+);
+
 export const pushTokens = pgTable(
   'push_tokens',
   {
@@ -110,6 +139,18 @@ export const tasks = pgTable(
      * Null means nothing has been decided and the saved preference applies.
      */
     callLanguage: text('call_language'),
+    /**
+     * A number the user named in the request itself. Present means there is
+     * nothing to search for -- Dial rings this and never asks where to look.
+     * Server-side only, like every other raw number.
+     */
+    directPhone: text('direct_phone'),
+    /**
+     * How many times Dial has asked what the call is for. Counted so an
+     * unclear answer can be met with another question without the two of them
+     * going round forever.
+     */
+    purposeAsks: integer('purpose_asks').notNull().default(0),
     /** ISO 3166-1 alpha-2 of the area searched, so the calling step can offer
      * that country's language without geocoding again. */
     countryCode: text('country_code'),

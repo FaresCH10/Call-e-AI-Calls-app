@@ -61,6 +61,65 @@ exercised are marked PASS.
 | A directory timeout retries instead of failing | PASS | Overpass mirror + queue backoff |
 | A country is refused as too coarse to search | PASS | `finland` -> country/1181 km -> asks for a town instead of reporting no shops exist |
 | Zero results widens the radius before giving up | PASS | 4x, capped at 50 km |
+| "We could not get an answer" is not filed as an answer | PASS | `question_answered: no` -> `answered_no_answer_to_question` |
+| "This shop cannot help" is still a real answer | PASS | `can_repair: no` -> `answered_useful` |
+| A non-answer never becomes the best verified option | PASS | `result.best` stays null |
+| A non-answer does not count towards the comparison | PASS | Dial keeps calling instead of stopping on greetings |
+| Each family declares which question its field asks | PASS | Asserted per family, not inferred |
+| A stalled task is still given up on | PASS | Nothing happening is what the net measures |
+| A task taking its turn is not given up on | PASS | Six businesses were once failed having never been dialled |
+| Only one call is ever in flight | PASS | Peak concurrency 1 across a four-call task |
+| The next business is rung only after the last finishes | PASS | One wave per business, none left pending |
+| Call limits in tests do not come from a developer's .env | PASS | Harness pins them; Vitest loads .env into process.env |
+| Dial keeps calling past two comparable answers | PASS | `COMPARABLE_TARGET`, not a hard-coded 2 |
+| It stops the moment the goal is met | PASS | Target 3, exactly 3 calls |
+| A request naming its own number wins | PASS | "ring five places" -> 5 comparable |
+| Still bounded when the goal cannot be met | PASS | Stops at `MAX_CALLS_UNTIL_RESULT` |
+| The comparison is shown even with one answer | PASS | And says there was nothing to weigh it against |
+| The brief caps how often a question is repeated | PASS | At most twice, then thank and end |
+| Being sent to a website ends the call | PASS | Recorded as a refusal, not rephrased and retried |
+| A repeated reply is treated as a recording | PASS | Asking a recording again cannot work |
+| Holding does not become a loop | PASS | Wait once, not twice |
+| Ending with no answer is stated to be a good outcome | PASS | Otherwise every local decision favours trying once more |
+| Any compared business can be acted on | PASS | Not only the one that came top |
+| Dial rings past the ordinary ceiling when nothing is usable | PASS | Stops at `MAX_CALLS_UNTIL_RESULT`, not `MAX_CALLS_PER_TASK` |
+| Persistence stops the moment something comparable arrives | PASS | It exists to get an answer, not to exhaust the list |
+| Persistence is still bounded | PASS | 40 businesses available, 5 rung |
+| The daily budget still binds while persisting | PASS | Real money, not judgement |
+| The timeline distinguishes the two reasons for trying another | PASS | "Still nothing usable — trying X" |
+| The best option can be rung back to act | PASS | New task carries the user's instruction and that business |
+| An acted-on commitment is gated afresh | PASS | Appointment waits for confirmation |
+| An empty instruction is refused | PASS | 400, never a call with nothing to say |
+| Every CALL-E error code has a user-facing message | PASS | Eight were missing, including `call_not_ready` |
+| No message key matches a non-existent code | PASS | `recipient_schema_invalid` never applied; the real code is `recipient_result_schema_invalid` |
+| No code renders as the generic sentence | PASS | The generic one is kept for "no code at all" |
+| A call the service was not ready to place is retried | PASS | Nothing was dialled, and the idempotency key makes a retry safe |
+| Failures that would re-ring a stranger are never retried | PASS | `invalid_phone`, `recipient_blocked`, `insufficient_balance` and others |
+| A user can call a business Dial skipped | PASS | Call placed, timeline says it was asked for |
+| A user-chosen call passes the per-task ceiling | PASS | The ceiling bounds Dial's autonomy, not the user |
+| The new outcome joins the comparison | PASS | Tally counts every call, not only Dial's own |
+| A business with no dialable number is refused | PASS | 409 `no_phone`, naming the business |
+| The same business is not called twice | PASS | 409 `already_called` |
+| The daily budget still applies | PASS | 429 `budget_exhausted` |
+| A policy forbidding calls still applies | PASS | 403 `not_authorized` |
+| Another user cannot call from someone else's task | PASS | 404 |
+| A direct call asks what it is for | PASS | "What do you want from Malik?"; nobody rung while Dial has nothing to say |
+| An unclear answer is met with another question | PASS | "idk" -> re-asked, worded differently |
+| The asking stops after two attempts | PASS | Call goes ahead, kept general, and says so |
+| A stated purpose is not questioned | PASS | No question when the request already says what it wants |
+| A search is never asked its purpose | PASS | The search phrase is itself the purpose |
+| A finished job releases its dedupe key | PASS | Same key re-enqueueable after completion and after death; refused while outstanding |
+| Answering a question after the search does not strand the task | PASS | Live: "call malik" ran to completion instead of stalling in `interpreting` |
+| A named contact is dialled without a location question | PASS | Live: contact matched, one call placed, task completed |
+| An unknown person gets a useful message, not a city prompt | PASS | "Dial does not have a number for Malik" |
+| Intake questions are skipped when Dial knows who to ring | PASS | No search to sharpen |
+| A number in the request skips the search entirely | PASS | No geocode, no directory, no location question; one call placed |
+| Ordinary numbers are not mistaken for phone numbers | PASS | Prices, order numbers, party sizes and times all yield nothing |
+| An emergency number is never extracted | PASS | `999` refused before the policy layer is reached |
+| A national number is read against the last searched country | PASS | "056 341 8581" + AE -> +971563418581 |
+| A saved contact names the call | PASS | Timeline and results show the contact name, not the bare number |
+| Saving the same number twice renames it | PASS | One row, latest name |
+| Contacts are private to their owner | PASS | Another user gets 404 on rename and delete, and an empty list |
 | A second server is refused, not allowed to corrupt the database | PASS | Live: refused by pid, first server stayed healthy |
 | A lock left by a dead process does not block startup | PASS | Cleared with a warning rather than requiring manual deletion |
 | A damaged database recovers on the next start | PASS | Live: moved to `.pgdata.corrupt-20260823-101534`, fresh one created, migrations ran |

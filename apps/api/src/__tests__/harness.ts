@@ -145,6 +145,18 @@ export async function createHarness(
     TEST_PROVIDER: process.env['TEST_PROVIDER'] ?? 'mock',
     SESSION_SECRET: process.env['SESSION_SECRET'] ?? 'test-secret-that-is-definitely-long-enough-1234',
     CALL_POLL_DELAY_MS: process.env['CALL_POLL_DELAY_MS'] ?? '1',
+    /*
+     * Pinned rather than inherited. Vitest loads the repository's .env into
+     * process.env, so a developer's own tuning silently became the tests'
+     * fixtures -- a suite asserting one call at a time passed or failed
+     * depending on a line in an untracked file. Tests that care about these
+     * override them explicitly.
+     */
+    CALL_WAVE_SIZE: '1',
+    MAX_CALLS_PER_TASK: '5',
+    MAX_CALLS_UNTIL_RESULT: '10',
+    COMPARABLE_TARGET: '3',
+    MAX_CALLS_PER_USER_PER_DAY: '25',
     ...(overrides.env ?? {}),
   });
   const handle = await createDatabase({ url: '', dataDir: 'memory://' });

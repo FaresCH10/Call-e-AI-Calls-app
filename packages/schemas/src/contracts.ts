@@ -97,6 +97,13 @@ export const taskDetailSchema = taskSummarySchema.extend({
   result: taskResultSchema.nullable(),
   events: z.array(taskEventSchema).default([]),
   pendingAuthorization: authorizationRequestSchema.nullable(),
+  /**
+   * The number the user named in the request, when they named one. Present
+   * means Dial searched for nothing, and the UI can offer to keep it.
+   */
+  directPhone: z.string().nullable().default(null),
+  /** True when that number is already in the user's contacts. */
+  directPhoneSaved: z.boolean().default(false),
   /** Set when state is needs_user_input. */
   clarificationQuestion: z.string().nullable(),
   /** Intake questions awaiting answers, if any. */
@@ -120,6 +127,21 @@ export const answerQuestionsRequestSchema = z.object({
   skipped: z.boolean().default(false),
 });
 
+/**
+ * Asks Dial to ring a business back and do something -- make the appointment,
+ * place the order, whatever the user says. The instruction is theirs, not a
+ * suggestion Dial generated, so there is nothing to fabricate.
+ */
+export const actOnBusinessRequestSchema = z.object({
+  candidateId: z.string().trim().min(1).max(80),
+  instruction: z.string().trim().min(3).max(500),
+});
+
+/** Calls one business the user picked out of the list Dial found. */
+export const callCandidateRequestSchema = z.object({
+  candidateId: z.string().trim().min(1).max(80),
+});
+
 export const authorizationDecisionRequestSchema = z.object({
   approved: z.boolean(),
 });
@@ -129,6 +151,46 @@ export const taskListResponseSchema = z.object({
   nextCursor: z.string().nullable(),
 });
 export type TaskListResponse = z.infer<typeof taskListResponseSchema>;
+
+/* --------------------------------------------------------------- contacts */
+
+/**
+ * A number the user chose to keep.
+ *
+ * The number is shown in full rather than masked: the user typed it, saved it,
+ * and needs to recognise it. Masking here would protect them from their own
+ * address book.
+ */
+export const contactSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  phoneE164: z.string(),
+  createdAt: z.string(),
+});
+export type Contact = z.infer<typeof contactSchema>;
+
+export const contactListResponseSchema = z.object({
+  contacts: z.array(contactSchema),
+});
+
+/**
+ * Saves a number. Either the number itself, or the task whose number to keep --
+ * the latter so a raw number never has to travel back to the client and in
+ * again just to be stored.
+ */
+export const createContactRequestSchema = z
+  .object({
+    name: z.string().trim().min(1).max(80),
+    phone: z.string().trim().min(3).max(30).optional(),
+    taskId: z.string().trim().min(1).max(64).optional(),
+  })
+  .refine((v) => Boolean(v.phone) !== Boolean(v.taskId), {
+    message: 'Give either a phone number or a task, not both.',
+  });
+
+export const renameContactRequestSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+});
 
 /* --------------------------------------------------------------- settings */
 

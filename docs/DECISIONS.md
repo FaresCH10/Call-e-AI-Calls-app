@@ -642,3 +642,400 @@ anything, which is the one moment no handles exist.
 
 The damaged directory is always kept, never deleted. This is development data,
 but it is still somebody's.
+
+## 38. A number in the request is the answer, not a detail
+
+"Call +971 56 341 8581 and ask about my order" needs no directory, no
+geocoding and no location. The search stage exists to work out who to ring, and
+that has already been settled. Asking where to look would be asking the user to
+repeat what they just said, in a worse form.
+
+So a task carrying a number skips discovery outright. It still goes through the
+same ranking, policy gates, daily budget, blocked-number check and evidence
+trail as a business Dial found -- only the finding is skipped.
+
+The number is read in code rather than by the model. A phone number is a
+precisely specified pattern with a library that validates it, so extraction is
+exact and testable; a model asked the same question would occasionally return a
+price or an order number, and Dial would ring it. The tests pin the cases that
+matter: "iPhone 13", "2820 dirhams", "order number 12345678" and "table for 4 at
+7pm" all yield nothing, and `999` is refused before the policy layer ever sees
+it. A national number ("056 341 8581") is read against the country of the user's
+last search, which is the best available evidence of where "local" is;
+international form needs no such hint.
+
+The candidate is named "The number you gave" rather than given an invented
+business name, because nothing was looked up and a name would be a guess
+presented as a fact. If the number is already in the user's contacts, its saved
+name is used instead -- which is the point of contacts existing.
+
+Contacts are renameable because that is the entire value. "+971 56 341 8581"
+means nothing a month later; "Ahmed at the garage" means everything. Saving a
+number already kept renames it rather than creating a second row. Numbers are
+shown in full on that page, unlike everywhere else: the masking elsewhere
+protects numbers Dial found, while these are numbers the user typed themselves,
+and hiding them would only stop them recognising their own address book. Saving
+from a task refers to the task rather than posting the number, so a raw number
+never travels to the client and back to be stored.
+
+## 39. A dedupe key reserves a slot, it does not claim one forever
+
+A task answered a question and then sat in `interpreting`, its progress list
+reading "Understanding request" with nothing after it. It never failed and
+never retried. It simply stopped.
+
+The queue's unique index on `dedupe_key` covers every row regardless of state.
+Enqueueing is `ON CONFLICT (dedupe_key) DO NOTHING`, so a *completed* job kept
+its key permanently and the same work could never be queued again. Answering a
+question after the search had run re-interpreted the task, which tried to
+enqueue `research:<taskId>` a second time; the insert was silently dropped, no
+job ran, and nothing moved.
+
+Silently is the operative word. The queue was working exactly as written, the
+task was in a legitimate state, and no error existed anywhere to find.
+
+The retry path already released the key -- with a comment explaining why a
+retried job must be re-enqueueable later. Completion and death did not. They do
+now, which is the same rule applied consistently: the key means "do not queue
+this twice while one is outstanding", and a finished job is not outstanding.
+
+Two things made the stall reachable in the first place, and both were worth
+fixing on their own account:
+
+**Skipping a question restarted the whole task.** The resume point was keyed on
+whether the language question was *answered* rather than on which question was
+asked, so skipping fell through to re-interpretation -- re-running the model and
+the entire search to reach a decision already reached. Skipping is a decision
+too.
+
+**Intake questions ran before Dial worked out who to call.** They exist to
+sharpen a search: which shop, what model, how soon. None of it applies when the
+request named the person, and asking anyway is precisely the friction the
+direct-dial path exists to avoid.
+
+## 40. "Call Malik" is a lookup, not a search
+
+Asked to "call malik and beg him to check if there is ice cream", Dial asked
+which city to search. Malik is a contact. No city would have helped.
+
+The interpreter had no way to say "the user named who to call", so a person's
+name had to be squeezed into `searchQuery` as though it were a business
+category, and the pipeline did the only thing it knew: try to find that category
+somewhere, and ask where. `calleeName` now carries it, and a name that matches a
+saved contact dials that contact directly.
+
+When no contact matches, Dial says it has no number for that person and suggests
+adding one, rather than asking for a postcode. The distinction matters: a
+missing location is a question worth asking, and a missing person is not -- no
+answer to "which city?" could ever produce Malik's number.
+
+Contact names are matched longest-first, so somebody with both "Malik" and
+"Malik at the garage" saved gets the more specific one rather than whichever the
+database happened to return first.
+
+## 41. Knowing who to call is half of it
+
+"Call Malik" says who to ring and nothing about what to say when he answers. A
+search never has this problem: "the cheapest screen repair" is both the target
+and the question. A direct call carries only the target, and placing one on that
+basis means ringing a real person with nothing to ask them.
+
+So when Dial has a number but no stated purpose it asks: *"What do you want from
+Malik?"* The purpose is a field the interpreter fills, not a length check on the
+instruction -- "idk", "whatever" and "just call them" are answers, and none of
+them is a purpose. The rule given to the model is the one that matters: set it
+only if you could tell the person on the phone what is being asked of them.
+
+An unclear answer earns another question, worded differently so the user can
+tell they were not understood rather than assuming the app is stuck.
+
+It stops after two. A user who cannot say what they want should not be held
+hostage to the question, so Dial says it will keep the call general and goes
+ahead. Two questions is persistence; five is an argument. That bound also means
+a model that never recognises a purpose cannot trap a task in a loop -- which,
+given the whole feature rests on the model's judgement, is not a hypothetical.
+
+The purpose reaches the call brief in the user's own words rather than only as
+Dial's paraphrase of it. When nothing was searched for, it is the only thing the
+agent has to go on.
+
+## 42. The ranking is a judgement, so the user can overrule it
+
+Dial rings the businesses it ranked highest and stops. The ranking is a
+judgement made from distance, opening hours and whether a number could be
+verified -- and the user can see the whole list, including the one Dial skipped
+because it was four kilometres away and happens to be the one across the road
+from their office.
+
+Every business Dial found now carries a "Call this one" button. It is the same
+call path as any other: the same brief, the same policy gates, the same evidence
+trail, and the outcome folds into the comparison so the final answer describes
+every call rather than only the ones Dial chose.
+
+The per-task ceiling deliberately does not apply. That limit exists to stop Dial
+working through twenty businesses on its own initiative -- it bounds Dial's
+autonomy, not the user's intent, and applying it here would mean refusing a
+person who is standing right there asking. The daily budget does still apply,
+because that is about real money and a real rate limit rather than about
+judgement, and so does the policy gate, because it is the user's own standing
+instruction about what Dial may do on a telephone.
+
+A finished task reopens rather than gaining a call in the background. A result
+that said "Dial spoke to 2 businesses" while a third is mid-conversation would
+be wrong in the most ordinary way.
+
+Refusals are distinguished rather than collapsed: a business with no number is a
+permanent fact about that business, a spent budget is temporary, and a policy
+refusal is the user's own setting. Each becomes a different status and a
+different sentence, because "that didn't work" is not an answer anybody can act
+on.
+
+## 43. A failure nobody can name is a failure nobody can fix
+
+Calls were failing with "The call could not be completed." The stored code was
+`call_not_ready`, which had no entry in the message table -- so it fell through
+to a sentence that is true of every failure and useful for none of them.
+
+Worse, the provider's own explanation was discarded at the same moment. The
+dispatch handler deliberately does not show provider text to the user, which is
+right; but it was not logging it either. So the one place the answer existed,
+it was thrown away, and working out what the service had objected to meant
+probing the live API by hand.
+
+Three fixes, and the third is the one that matters:
+
+**Every code now says something specific.** Eight had no message. One key,
+`recipient_schema_invalid`, matched no real code at all -- the API's is
+`recipient_result_schema_invalid` -- so that mapping had never once applied.
+
+**The provider's message is logged.** Kept out of the UI, kept in the logs,
+along with whether the code was one Dial has wording for. An unmapped code is
+now visible to whoever has to fix it.
+
+**A test asserts the table is complete.** Every code the API can return must
+have a message, no key may exist that is not a real code, and no code may render
+as the generic sentence. That is what stops this happening again, and it is
+worth more than the eight messages: the codes come from a generated schema that
+will grow, and the next addition now fails a test rather than reaching a user as
+a shrug.
+
+`call_not_ready` is also now retried. It is not in the vendor's list of
+retryable codes, but a call refused with it never reached a telephone -- no
+provider id comes back, nothing is dialled -- so the only cost of trying again
+is the request. Treating it as permanent meant writing a business off as
+uncontactable because the service was momentarily busy. It is safe to retry
+specifically because Dial sends a stable idempotency key: if the call really was
+created and only the response was lost, the retry returns that same call rather
+than placing a second one.
+
+## 44. Stopping is not the same as finishing
+
+A task rang five businesses, learned nothing usable from any of them, and
+reported "Dial spoke to 5 businesses, but none could confirm what you asked
+for" -- with ninety-three more sitting in the list untried. That is a report of
+Dial's effort, not an answer to the question.
+
+The per-task ceiling was doing two jobs and only one of them well. It exists so
+Dial does not spend five calls where two would do; it was also, accidentally,
+deciding when to give up. Those are different questions with different right
+answers. Five is generous when calls are producing results and far too few when
+none of them has.
+
+So there are now two bounds. `MAX_CALLS_PER_TASK` still governs how much Dial
+spends once it has something, and `MAX_CALLS_UNTIL_RESULT` governs how long it
+keeps trying while it has nothing. While nothing usable has come back, a
+business that answered unhelpfully is as good a reason to try someone else as
+one that never picked up -- the distinction only matters once there is
+something to protect.
+
+It is still a bound, not an invitation: the higher ceiling is where Dial gives
+up, and the daily budget binds regardless, because that one is about real money
+rather than about judgement. And the moment something comparable arrives, the
+persistence stops -- it exists to get an answer, not to exhaust the list.
+
+The timeline says which is happening. "Trying X instead" and "Still nothing
+usable — trying X" describe two different situations and should not read the
+same.
+
+## 45. Dial found them, so Dial can ring them back
+
+The best verified option is a business Dial found, rang, and got an answer
+from. Asking the user to pick up the phone themselves to act on that answer
+wastes the thing that was just established.
+
+The card now carries "Have Dial call them", and the user says what for --
+"book me in for tomorrow morning", "order two of the large ones". The
+instruction is theirs, in their own words, so there is nothing for Dial to
+propose and nothing to invent.
+
+It starts a new task rather than extending the finished one, for the same
+reason a follow-up always should: the original was a question and this is a
+commitment. It is interpreted from scratch, so its side effect, sensitivity and
+authorization requirement are worked out afresh and the user's policy gates it
+exactly as it would gate the same sentence typed into the box. An appointment
+still waits for confirmation if that is what the policy says.
+
+An empty instruction is refused. Ringing somebody with nothing to say to them
+is the one thing this must never do.
+
+## 46. Knowing when to stop talking
+
+A real call ran to fifteen exchanges against a recorded message. The recording
+said, three different ways, that the restaurant took enquiries only through its
+website. Dial rephrased the question each time, said "I'll wait", said "I'll
+hold", said "take your time", and asked again -- for minutes, at the customer's
+expense, against a machine that could not hear it.
+
+Nothing in the brief was wrong. There was simply nothing in it about when to
+stop. "Do not argue, pressure, or call back repeatedly" reads as advice about
+manner, not as a stop condition, so the agent kept being polite and kept going.
+Persistence looked like the helpful choice at every individual turn, which is
+how fifteen of them happen without anything going obviously wrong.
+
+The brief now says when to hang up:
+
+- Ask at most twice. If the second reply does not answer, thank them and end.
+- If they say they cannot help by phone, or send you to a website, an email
+  address, a live chat or a form -- thank them, end, and record it. Do not
+  rephrase and try again.
+- If two replies say substantially the same thing, it is a recording or a
+  script. Asking a recording again cannot work.
+- If asked to hold, wait once. Not twice.
+- **Ending politely with no answer is a good outcome.** A long call that annoys
+  somebody is worse than "unknown", because it costs the customer their
+  reputation with that business.
+
+That last line is the one that matters. Without it the agent has no reason to
+prefer stopping, and every local decision points towards trying once more.
+
+The refusal is also recorded in the business's own words -- "only takes
+enquiries via the website". That is a real, useful answer about this business,
+and the customer can act on it. "Unknown" with no reason is not.
+
+## 47. An answer is worth acting on wherever it came from
+
+Every business that gave a comparable answer now carries "Have Dial call",
+not only the one that came top. Cheapest is not always the one wanted -- the
+second-cheapest may be the one across the road, or the one that sounded like it
+knew what it was talking about.
+
+The instruction is the user's own words, typed into the prompt that follows, so
+there is nothing for Dial to propose and nothing to invent. It starts a new task
+which is interpreted from scratch, so a commitment is gated by the user's policy
+exactly as the same sentence typed into the box would be.
+
+## 48. Enough is a property of the task, not a constant
+
+Dial stopped after three calls. Two of the first three had answered usefully,
+and the rule was `useful >= 2`, so it went to comparison and finished --
+presenting "the cheapest" on the strength of two quotes while ninety-five
+businesses sat in the list untried.
+
+Two is a defensible number for "don't spend five calls where two would do". It
+is not a defensible basis for telling somebody which of ninety-eight shops is
+cheapest. The mistake was writing a budget where a goal belonged.
+
+The threshold is now `COMPARABLE_TARGET`, three by default, and a request that
+names its own number wins -- "ring five places" is the user saying what enough
+means, and `constraints.candidateLimit` already carried it.
+
+That also settles which ceiling applies while Dial is still working. Short of
+the goal, the bound is `MAX_CALLS_UNTIL_RESULT`, because that is the one about
+"still trying" rather than "not spending more than needed". `MAX_CALLS_PER_TASK`
+now means what its name suggests -- how many Dial plans up front -- and the
+moment the goal is met it stops, whichever ceiling was in play.
+
+Three older tests asserted the previous bound and now assert the new one. They
+were not wrong; the thing they described changed, and they still guard against
+ringing every business in the list.
+
+## 49. Show the comparison, not just the winner
+
+The result showed the best option and, when there happened to be alternatives, a
+table. With one comparable answer there was no table at all -- so the page
+looked identical whether Dial had weighed one business or five, and "best
+verified option" carried the same visual weight either way.
+
+The comparison now always appears when anything came back, including the
+outcomes that could not be compared, marked as such. It opens by saying what was
+actually weighed: "Dial compared 4 businesses that gave a usable answer and
+picked Stop And Go", or, when there was only one, "Only one business gave a
+comparable answer, so there was nothing to weigh it against."
+
+That last sentence is the point of the change. A single quote presented as a
+winner is the kind of quiet overstatement the honest-comparison rule exists to
+prevent, and the fix is to say plainly how thin the basis was.
+
+## 50. One phone at a time
+
+Dial rang three businesses simultaneously. Three real people were interrupted
+for a question the first of them may well have answered, and the user watching
+saw a row of calls in flight with no way to tell which would come back.
+
+`CALL_WAVE_SIZE` is now one. The machinery was already there -- `maybeAdvance`
+refuses to start anything while a dispatched call is unresolved, so a wave of
+one is a queue of one. It is slower, and it is what somebody making these calls
+themselves would do.
+
+`MAX_CALL_CONCURRENCY` is a different thing wearing a similar name: it is how
+many *queue jobs* a worker takes at once, and interpreting, searching and
+polling all run through that queue. Throttling it would slow every task without
+making the phones any quieter. Both now say so where they are defined.
+
+Finding this took longer than it should have, for a reason worth recording.
+Vitest loads the repository's `.env` into `process.env`, so the developer's own
+`CALL_WAVE_SIZE=3` was silently supplying the tests' fixtures. Changing the
+default in code did nothing, twice, and the evidence said the config was one
+while the running system behaved as three. The harness now pins every call limit
+explicitly instead of inheriting it, because a suite whose meaning depends on an
+untracked file is not a suite that proves anything.
+
+That also means the default was never the whole fix: a `.env` that already
+names the setting overrides it. The one in this repository was updated too.
+
+## 51. "No" means two different things
+
+Two calls to Paris bakeries. One recipient said only "Oui, Allô ?" and the line
+ended; the other said "au revoir". CALL-E reported both accurately --
+`question_answered: "no"` -- and Dial filed both as `answered_useful`, counted
+them towards the comparison, and would have been willing to present "Oui, Allô
+?" as a verified result.
+
+One line caused it, and its comment sounded right:
+
+> An explicit "no" is a real, useful answer: this business cannot help.
+
+That is true of `can_repair: "no"` -- the user learns this shop cannot fix it.
+It is the exact opposite of `question_answered: "no"`, which says nothing was
+learned at all. The same field name, the same value, two contradictory meanings,
+and the code could not tell them apart because nothing recorded which question
+the field was asking.
+
+A call family now declares it. `general_inquiry` and `status_check` ask *whether
+an answer was obtained*; the rest ask *whether the business can help*. It is
+asserted per family in the tests rather than inferred, because getting it
+backwards is the whole bug.
+
+The consequences were worse than a mislabelled row. Those calls counted towards
+the comparable target, so Dial stopped early believing it had answers, and a
+greeting was eligible to become the best verified option -- a verified result
+where nothing had been verified.
+
+## 52. Waiting your turn is not being stuck
+
+The same records showed six businesses marked failed with `timeout`, having
+never been dialled at all.
+
+The safety net fired a fixed fifteen minutes after the first call, regardless of
+what had happened since. That was survivable when Dial rang three businesses at
+once. Ringing them one at a time, a task working properly through its list ran
+past the deadline, and everything still queued was written off.
+
+It is now a stall detector rather than a deadline: it looks at when the task
+last did anything, and if that was recent it extends itself instead of giving
+up. A genuinely stuck task is still caught, because nothing having happened is
+exactly what it now measures.
+
+Worth noting how this was found. It was not the reported problem -- the question
+was who had hung up on a Paris bakery -- and it surfaced only because answering
+that meant reading the real call records rather than reasoning about the code.

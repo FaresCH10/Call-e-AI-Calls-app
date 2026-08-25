@@ -11,6 +11,7 @@ import {
   notifications,
   usageCounters,
   auditEvents,
+  contacts,
   type Db,
 } from '@dial/database';
 import {
@@ -396,6 +397,18 @@ export async function toTaskDetail(db: Db, row: typeof tasks.$inferSelect): Prom
 
   const auth = pending[0];
 
+  // Whether the number is already kept, so the UI offers to save it only when
+  // there is something to save.
+  const savedContact = row.directPhone
+    ? (
+        await db
+          .select({ id: contacts.id })
+          .from(contacts)
+          .where(and(eq(contacts.userId, row.userId), eq(contacts.phoneE164, row.directPhone)))
+          .limit(1)
+      ).length > 0
+    : false;
+
   return {
     ...toTaskSummary(row),
     interpreted: (row.interpreted as TaskDetail['interpreted']) ?? null,
@@ -421,6 +434,8 @@ export async function toTaskDetail(db: Db, row: typeof tasks.$inferSelect): Prom
           decidedAt: auth.decidedAt,
         }
       : null,
+    directPhone: row.directPhone ?? null,
+    directPhoneSaved: savedContact,
     clarificationQuestion: row.clarificationQuestion,
     clarifyingQuestions: (row.clarifyingQuestions as TaskDetail['clarifyingQuestions']) ?? [],
     clarifyingAnswers: (row.clarifyingAnswers as Record<string, string>) ?? {},

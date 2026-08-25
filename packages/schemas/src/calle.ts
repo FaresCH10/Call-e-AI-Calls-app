@@ -77,6 +77,18 @@ export const RETRYABLE_CALLE_ERROR_CODES: readonly CalleErrorCode[] = [
   'rate_limit_exceeded',
   'provider_unavailable',
   'internal_error',
+  /*
+   * Not in the docs' list, added from what it does in practice: a call refused
+   * with this never reached a telephone -- no provider id comes back and
+   * nothing is dialled -- so the only cost of trying again is the request
+   * itself. Treating it as permanent meant a business was written off as
+   * uncontactable because the service was momentarily busy.
+   *
+   * Safe to retry specifically because Dial sends a stable idempotency key: if
+   * the call was in fact created and only the response was lost, the retry
+   * returns that same call rather than placing a second one.
+   */
+  'call_not_ready',
 ];
 
 /** Plain-language rendering of each failure, for the UI. Section 28 / section 36. */
@@ -92,12 +104,20 @@ export const CALLE_ERROR_MESSAGES: Record<string, string> = {
   rate_limit_exceeded: 'Too many calls at once. Dial will retry shortly.',
   provider_unavailable: 'The calling service is temporarily unavailable.',
   result_schema_invalid: 'Dial could not structure the questions for this call.',
-  recipient_schema_invalid: 'Dial could not structure the questions for this call.',
   unauthorized: 'Dial is not configured with valid calling credentials.',
   forbidden: 'The calling account is not permitted to place this call.',
   internal_error: 'The calling service hit an internal error.',
   not_found: 'The call record could not be found.',
   idempotency_conflict: 'A conflicting call was already placed for this step.',
+  invalid_request: 'Dial sent something the calling service could not accept.',
+  // Nothing was dialled: the service could not start the call at that moment.
+  call_not_ready: 'The calling service was not ready to place this call. Dial will try again.',
+  recipient_result_schema_invalid: 'Dial could not structure the questions for this call.',
+  goal_not_published: 'The calling template this call needs has not been published.',
+  goal_not_executable: 'The calling template this call needs cannot be run.',
+  goal_not_ready: 'The calling template this call needs is not ready yet.',
+  schema_override_not_allowed: 'Dial may not change the questions for this kind of call.',
+  variables_invalid: 'Dial could not supply the details this call needed.',
 };
 
 export function describeCalleError(code: string | null | undefined, fallback?: string): string {

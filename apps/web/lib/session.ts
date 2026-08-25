@@ -1,5 +1,11 @@
 import { cookies } from 'next/headers';
-import type { SessionUser, TaskListResponse, TaskDetail, UserSettings } from '@dial/schemas';
+import type {
+  SessionUser,
+  TaskListResponse,
+  TaskDetail,
+  UserSettings,
+  Contact,
+} from '@dial/schemas';
 
 /**
  * Server-side data loading. Runs on the Next.js server with the user's cookie,
@@ -41,4 +47,8 @@ export function getTask(id: string): Promise<TaskDetail | null> {
 
 export function getSettings(): Promise<UserSettings | null> {
   return serverFetch<UserSettings>('/api/settings');
+}
+
+export function getContacts(): Promise<{ contacts: Contact[] } | null> {
+  return serverFetch<{ contacts: Contact[] }>('/api/contacts');
 }

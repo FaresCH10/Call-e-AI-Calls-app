@@ -1,11 +1,14 @@
-import { eq, and, or, isNull, sql } from 'drizzle-orm';
+import { eq, and, or, isNull, isNotNull, desc, sql } from 'drizzle-orm';
 import {
   tasks,
   calls,
   callAttempts,
   businessCandidates,
+  taskEvents,
   authorizationRequests,
+  contacts,
   enqueueJob,
+  type Db,
 } from '@dial/database';
 import {
   getCallFamily,
@@ -15,6 +18,7 @@ import {
   type DialTask,
   type CallDisposition,
   type TaskResult,
+  type BusinessCandidate,
 } from '@dial/schemas';
 import {
   rankCandidates,
@@ -26,6 +30,8 @@ import {
   isValidE164,
   isBlockedNumber,
   shouldAskClarification,
+  extractDialTargets,
+  normalizePhone,
   primaryLanguageForCountry,
   normalizeLanguageCode,
   languageOptions,
@@ -196,10 +202,102 @@ export async function handleInterpret(
     })
     .where(eq(tasks.id, task.id));
 
+  /*
+   * A number in the request answers the question the search stage exists to
+   * answer. Read from the instruction in code rather than from the model: a
+   * phone number is a precisely specified pattern with a library that validates
+   * it, where a model would occasionally hand back a price or an order number
+   * and Dial would ring it.
+   */
+  const hintCountry = await recentCountryFor(ctx.db, task.userId);
+  const [target] = extractDialTargets(task.instruction, hintCountry);
+  let directPhone = target?.e164 ?? null;
+
+  /*
+   * "Call Malik" names who to ring, not a kind of business to look for. Without
+   * this, Malik is treated as a search term and the user is asked which city to
+   * search for him in -- a question that cannot have a useful answer.
+   */
+  if (!directPhone && dialTask.calleeName) {
+    const known = await findContactByName(ctx.db, task.userId, dialTask.calleeName);
+    if (known) {
+      directPhone = known.phoneE164;
+    } else {
+      // Dial has no number for this person, and no amount of searching would
+      // find one. Say so, rather than asking where to look.
+      await setState(
+        ctx,
+        task.id,
+        'needs_user_input',
+        `Dial does not have a number for ${dialTask.calleeName}.`,
+        {
+          clarificationQuestion:
+            `Dial does not have a number for ${dialTask.calleeName}. ` +
+            'Add them to your contacts, or include the number in your request.',
+        },
+      );
+      incrementCounter('task.unknown_callee');
+      return;
+    }
+  }
+
+  /*
+   * Dial knows who to ring but not what to say.
+   *
+   * A search carries its own purpose -- "the cheapest screen repair" is both
+   * who to call and what to ask. "Call Malik" is only the first half, and a
+   * call placed on that would open with nothing to say to whoever answers.
+   *
+   * An unclear answer earns another question rather than a shrug, because the
+   * alternative is ringing a real person with no idea what for. Bounded, so a
+   * user who cannot say what they want is eventually let go rather than held in
+   * a loop.
+   */
+  if (directPhone && !dialTask.callPurpose) {
+    if (task.purposeAsks < MAX_PURPOSE_ASKS) {
+      const who = dialTask.calleeName ?? 'them';
+      const again = task.purposeAsks > 0;
+      await ctx.db
+        .update(tasks)
+        .set({ purposeAsks: task.purposeAsks + 1 })
+        .where(eq(tasks.id, task.id));
+      await setState(ctx, task.id, 'needs_user_input', `What should Dial ask ${who}?`, {
+        clarificationQuestion: again
+          ? `Dial still is not sure what to ask ${who}. What should it say when they answer?`
+          : `What do you want from ${who}?`,
+      });
+      incrementCounter('task.purpose_asked', { repeat: String(again) });
+      return;
+    }
+    // Asked enough. Going ahead with a vague brief is more honest than holding
+    // the task hostage to a question the user is not going to answer.
+    logger.info('proceeding without a stated purpose', {
+      taskId: task.id,
+      asks: task.purposeAsks,
+    });
+    await addEvent(
+      ctx,
+      task.id,
+      'interpreting',
+      'Dial will keep the call general, since it is not sure what to ask.',
+    );
+  }
+
+  if (directPhone) {
+    await ctx.db.update(tasks).set({ directPhone }).where(eq(tasks.id, task.id));
+    logger.info('the request named who to call, so nothing needs finding', {
+      taskId: task.id,
+      via: target ? 'number' : 'contact',
+    });
+  }
+
   // The intake step: a few targeted questions asked once, before any work.
   // Distinct from the model interrupting mid-pipeline, which is suppressed
   // below -- these are generated deliberately, capped, and skippable.
-  if (!task.intakeDone && settings.askClarifyingQuestions && ctx.questionGenerator) {
+  // Intake questions exist to sharpen a search -- which shop, what model, how
+  // soon. None of that applies when the request already said who to ring, and
+  // asking anyway is the friction the whole direct-dial path avoids.
+  if (!directPhone && !task.intakeDone && settings.askClarifyingQuestions && ctx.questionGenerator) {
     const questions = await ctx.questionGenerator
       .generate({ instruction: task.instruction, task: dialTask })
       .catch(() => []);
@@ -225,7 +323,8 @@ export async function handleInterpret(
 
   // Only interrupt when the task genuinely cannot proceed. The model's opinion
   // that a question would be nice is not sufficient -- see shouldAskClarification.
-  if (dialTask.clarificationNeeded && shouldAskClarification(dialTask)) {
+  // A named number settles the commonest thing it asks about, so it is ignored.
+  if (!directPhone && dialTask.clarificationNeeded && shouldAskClarification(dialTask)) {
     await setState(ctx, task.id, 'needs_user_input', dialTask.clarificationNeeded, {
       clarificationQuestion: dialTask.clarificationNeeded,
     });
@@ -341,6 +440,132 @@ export const CALL_LANGUAGE_QUESTION_ID = 'call_language';
  */
 const MIN_CALLABLE_BEFORE_WIDENING = 3;
 
+/**
+ * How many times Dial asks what a direct call is for before giving up and
+ * keeping the call general. Two questions is persistence; five is an argument.
+ */
+const MAX_PURPOSE_ASKS = 2;
+
+/**
+ * Rings a number the user supplied, skipping discovery entirely.
+ *
+ * There is nothing to find, nowhere to search, and no location to ask about.
+ * The number still goes through the same ranking and calling path as a
+ * discovered business, so the policy gates, the daily budget, the blocked-number
+ * check and the evidence trail all apply exactly as they otherwise would.
+ */
+async function dialTheNumberGiven(
+  ctx: OrchestratorContext,
+  task: { id: string; userId: string; directPhone: string | null; instruction: string },
+  dialTask: DialTask,
+): Promise<void> {
+  const phone = task.directPhone!;
+  const country = phoneCountryOf(phone);
+
+  await setState(ctx, task.id, 'researching', 'Using the number you gave');
+
+  const candidate: BusinessCandidate = {
+    id: `given_${phone.replace(/[^0-9]/g, '')}`,
+    // Named for what it is. Inventing a business name for a number nobody
+    // looked up would be presenting a guess as a fact.
+    name: (await contactNameFor(ctx.db, task.userId, phone)) ?? 'The number you gave',
+    category: null,
+    address: null,
+    latitude: null,
+    longitude: null,
+    phoneE164: phone,
+    phoneRaw: phone,
+    website: null,
+    source: 'user_supplied',
+    sourceUrl: null,
+    rating: null,
+    reviewCount: null,
+    distanceMeters: null,
+    openingHours: null,
+    // The user gave it, which is a stronger warrant than any directory.
+    phoneVerified: true,
+    verificationSources: [],
+  };
+
+  const ranked = rankCandidates([candidate], { task: dialTask });
+  await saveCandidates(ctx.db, task.id, ranked);
+  await ctx.db
+    .update(tasks)
+    .set({ discoveredCount: 1, countryCode: country })
+    .where(eq(tasks.id, task.id));
+
+  await setState(ctx, task.id, 'candidates_ready', 'Calling the number you gave');
+
+  const settings = await getSettings(ctx.db, task.userId);
+  if (await askCallLanguage(ctx, task.id, country, null, settings.callingLanguage)) return;
+
+  await enqueueJob(ctx.db, 'task.plan_calls', { taskId: task.id }, { dedupeKey: `plan:${task.id}` });
+}
+
+/** The country a number belongs to, for the language recommendation. */
+function phoneCountryOf(phoneE164: string): string | null {
+  const normalized = normalizePhone(phoneE164, null);
+  return normalized?.country ?? null;
+}
+
+/**
+ * Finds a saved contact by the name the user used.
+ *
+ * Matched case-insensitively, and on the longest name first: somebody with
+ * both "Malik" and "Malik at the garage" saved means the more specific one
+ * wins when the request mentions it, rather than whichever the database
+ * happened to return first.
+ */
+async function findContactByName(
+  db: Db,
+  userId: string,
+  name: string,
+): Promise<{ phoneE164: string; name: string } | null> {
+  const wanted = name.trim().toLowerCase();
+  if (!wanted) return null;
+
+  const rows = await db
+    .select({ name: contacts.name, phoneE164: contacts.phoneE164 })
+    .from(contacts)
+    .where(eq(contacts.userId, userId));
+
+  const byLength = [...rows].sort((a, b) => b.name.length - a.name.length);
+  return (
+    byLength.find((c) => c.name.toLowerCase() === wanted) ??
+    byLength.find((c) => {
+      const candidateName = c.name.toLowerCase();
+      return candidateName.includes(wanted) || wanted.includes(candidateName);
+    }) ??
+    null
+  );
+}
+
+/** What the user already calls this number, if they have saved it. */
+async function contactNameFor(db: Db, userId: string, phoneE164: string): Promise<string | null> {
+  const rows = await db
+    .select({ name: contacts.name })
+    .from(contacts)
+    .where(and(eq(contacts.userId, userId), eq(contacts.phoneE164, phoneE164)))
+    .limit(1);
+  return rows[0]?.name ?? null;
+}
+
+/**
+ * The country of the user's most recent search, used only to read a number
+ * written in national form. Someone who types "056 341 8581" means a local
+ * number, and the last place they searched is the best evidence of where local
+ * is. International form needs no hint and never consults this.
+ */
+async function recentCountryFor(db: Db, userId: string): Promise<string | null> {
+  const rows = await db
+    .select({ countryCode: tasks.countryCode })
+    .from(tasks)
+    .where(and(eq(tasks.userId, userId), isNotNull(tasks.countryCode)))
+    .orderBy(desc(tasks.createdAt))
+    .limit(1);
+  return rows[0]?.countryCode ?? null;
+}
+
 /* -------------------------------------------------------------- research */
 
 export async function handleResearch(
@@ -352,6 +577,11 @@ export async function handleResearch(
   const parsed = dialTaskSchema.safeParse(task.interpreted);
   if (!parsed.success) return;
   const dialTask = parsed.data;
+
+  if (task.directPhone) {
+    await dialTheNumberGiven(ctx, task, dialTask);
+    return;
+  }
 
   await setState(ctx, task.id, 'researching');
 
@@ -894,7 +1124,10 @@ export async function handleDispatchWave(
     ctx.db,
     'task.timeout',
     { taskId: task.id },
-    { runAt: new Date(Date.now() + 15 * 60_000), dedupeKey: `timeout:${task.id}` },
+    {
+      runAt: new Date(Date.now() + ctx.config.limits.stallTimeoutMs),
+      dedupeKey: `timeout:${task.id}`,
+    },
   );
 
   // Some or all of this wave may already be terminal (applied inline above, or
@@ -929,7 +1162,22 @@ async function handleDispatchError(
     .where(eq(calls.id, callId));
 
   incrementCounter('calls.dispatch_failed', { code });
-  logger.warn('call dispatch failed', { taskId, callId, code });
+  /*
+   * The provider's own message is logged even though it is deliberately kept
+   * out of the UI. Without it an unmapped code leaves nothing to go on: a call
+   * failed with `call_not_ready`, the user was shown "The call could not be
+   * completed", and working out what the service had actually objected to
+   * meant probing the API by hand because the explanation had been discarded
+   * at the only point it existed.
+   */
+  logger.warn('call dispatch failed', {
+    taskId,
+    callId,
+    businessName,
+    code,
+    providerMessage: providerError?.message ?? (error as Error)?.message ?? null,
+    mapped: describeCalleError(code) !== 'The call could not be completed.',
+  });
   await addEvent(ctx, taskId, 'calling', `${businessName}: ${describeCalleError(code)}`);
 
   // Balance and auth failures affect every remaining call, so stop early
@@ -1091,7 +1339,12 @@ export async function applyTerminalSnapshot(
   const settings = task ? await getSettings(ctx.db, task.userId) : null;
 
   const parsedResult = family.parse(snapshot.structuredResult);
-  const disposition = deriveDisposition(snapshot, parsedResult, family.viabilityField);
+  const disposition = deriveDisposition(
+    snapshot,
+    parsedResult,
+    family.viabilityField,
+    family.viabilityAsksWhetherAnswered ?? false,
+  );
 
   const updated = await ctx.db
     .update(calls)
@@ -1186,6 +1439,7 @@ export function deriveDisposition(
   snapshot: { status: string; structuredResult: unknown; summary: string | null; failureCode: string | null },
   parsedResult: Record<string, unknown> | null,
   viabilityField: string | null,
+  viabilityAsksWhetherAnswered = false,
 ): CallDisposition {
   if (snapshot.status === 'failed' || snapshot.status === 'canceled') {
     if (snapshot.failureCode === 'no_answer') return 'no_answer';
@@ -1208,7 +1462,21 @@ export function deriveDisposition(
       const refused = typeof parsedResult['refused_reason'] === 'string' && parsedResult['refused_reason'];
       return refused ? 'refused' : 'answered_no_answer_to_question';
     }
-    // An explicit "no" is a real, useful answer: this business cannot help.
+    /*
+     * "No" means opposite things depending on what the field asks.
+     *
+     * `can_repair: "no"` is a real answer -- this shop cannot fix it, and the
+     * user learned something. `question_answered: "no"` is the opposite:
+     * nothing was learned. Reading the second as the first filed a call where
+     * the business said only "Oui, Allô ?" and hung up as a useful answer,
+     * counted it towards the comparison, and let it stand as a verified result.
+     */
+    if (value === 'no' && viabilityAsksWhetherAnswered) {
+      const refused =
+        typeof parsedResult['refused_reason'] === 'string' && parsedResult['refused_reason'];
+      return refused ? 'refused' : 'answered_no_answer_to_question';
+    }
+    // An explicit "no" to whether they can help is a real, useful answer.
     return 'answered_useful';
   }
   return 'answered_useful';
@@ -1237,9 +1505,22 @@ export async function maybeAdvance(ctx: OrchestratorContext, taskId: string): Pr
   const useful = all.filter((c) => c.disposition === 'answered_useful').length;
   const nextWave = all.find((c) => !c.providerCallId)?.wave ?? null;
 
-  // Enough evidence: stop. Every extra call costs money and rings a real
+  /*
+   * How many comparable answers this task actually needs.
+   *
+   * This used to be two, which meant a task could finish after three calls
+   * having compared two shops -- a thin basis for telling somebody which is
+   * cheapest, and it stopped while ninety more sat in the list. A request that
+   * names its own number ("ring five places") says so and wins.
+   */
+  const interpreted = dialTaskSchema.safeParse(task.interpreted);
+  const target =
+    (interpreted.success ? interpreted.data.constraints.candidateLimit : null) ??
+    ctx.config.limits.comparableTarget;
+
+  // The goal is met: stop. Every extra call costs money and rings a real
   // business, so there is no reason to keep going.
-  if (useful >= 2) {
+  if (useful >= target) {
     await enqueueJob(
       ctx.db,
       'task.compare',
@@ -1250,9 +1531,29 @@ export async function maybeAdvance(ctx: OrchestratorContext, taskId: string): Pr
   }
 
   if (nextWave === null) {
-    // Nothing pre-planned is left, but businesses that did not answer should
-    // not end the task while other candidates are sitting unused.
-    const replaced = await substituteUnansweredCandidate(ctx, taskId, all);
+    /*
+     * Nothing pre-planned is left. Two reasons not to stop yet:
+     *
+     *  - Somebody did not answer, and other candidates are sitting unused.
+     *  - Nothing usable has come back at all. Ending here hands the user the
+     *    sentence "Dial spoke to 5 businesses and none could confirm what you
+     *    asked for" while ninety more sit in the list untried, which is a
+     *    report of Dial's effort rather than an answer to the question.
+     *
+     * The second case is allowed a higher ceiling, because the ordinary one is
+     * about not spending five calls where two would do -- not about giving up.
+     */
+    /*
+     * Short of the goal, so keep going -- against the higher ceiling, because
+     * that is the one that governs "still trying" rather than "spending more
+     * than needed". Reaching this line at all means the goal is unmet.
+     */
+    const replaced = await tryAnotherBusiness(ctx, taskId, all, {
+      ceiling: ctx.config.limits.maxCallsUntilResult,
+      // While the goal is unmet, a business that answered unhelpfully is as
+      // good a reason to try someone else as one that never picked up.
+      requireUnanswered: false,
+    });
     if (replaced) return;
 
     await enqueueJob(
@@ -1273,25 +1574,26 @@ export async function maybeAdvance(ctx: OrchestratorContext, taskId: string): Pr
 }
 
 /**
- * Dispatches the next-best business Dial has not tried yet, to replace one that
- * did not answer.
+ * Dispatches the next-best business Dial has not tried yet.
  *
  * Bounded by the same per-task ceiling as the original plan, so a run of
  * unanswered calls cannot quietly turn a 3-call task into a 20-call one. Returns
  * true when a replacement was dispatched.
  */
-async function substituteUnansweredCandidate(
+async function tryAnotherBusiness(
   ctx: OrchestratorContext,
   taskId: string,
   existing: Array<{ candidateId: string; disposition: string; wave: number; id: string }>,
+  options: { ceiling: number; requireUnanswered: boolean },
 ): Promise<boolean> {
-  if (existing.length >= ctx.config.limits.maxCallsPerTask) return false;
+  if (existing.length >= options.ceiling) return false;
 
-  // Only worth substituting for a business that never gave an answer.
   const unanswered = existing.filter((c) =>
     ['no_answer', 'voicemail', 'failed'].includes(c.disposition),
   );
-  if (unanswered.length === 0) return false;
+  // When something usable has already come back, only a business that never
+  // answered justifies ringing someone else. When nothing has, any of them do.
+  if (options.requireUnanswered && unanswered.length === 0) return false;
 
   const tried = new Set(existing.map((c) => c.candidateId));
   const ranked = await listCandidates(ctx.db, taskId);
@@ -1327,12 +1629,19 @@ async function substituteUnansweredCandidate(
       idempotencyKey: callIdempotencyKey(taskId, next.candidate.id, 1),
       disposition: 'pending',
       wave,
-      replacedCallId: unanswered[0]!.id,
+      ...(unanswered[0] ? { replacedCallId: unanswered[0].id } : {}),
     })
     .onConflictDoNothing();
 
   await markSelected(ctx.db, [next.candidate.id]);
-  await addEvent(ctx, taskId, 'calling', `Trying ${next.candidate.name} instead`);
+  await addEvent(
+    ctx,
+    taskId,
+    'calling',
+    options.requireUnanswered
+      ? `Trying ${next.candidate.name} instead`
+      : `Not enough to compare yet — trying ${next.candidate.name}`,
+  );
   incrementCounter('calls.substituted');
 
   await enqueueJob(
@@ -1342,6 +1651,140 @@ async function substituteUnansweredCandidate(
     { dedupeKey: `wave:${taskId}:${wave}` },
   );
   return true;
+}
+
+/**
+ * Why a business the user picked could not be called.
+ *
+ * Distinguished rather than collapsed into one failure, because the caller
+ * turns each into a different HTTP status and a different sentence: a business
+ * with no number is a permanent fact about that business, a spent daily budget
+ * is temporary, and a policy refusal is the user's own setting.
+ */
+export type ManualCallRefusal =
+  | 'task_not_found'
+  | 'candidate_not_found'
+  | 'no_phone'
+  | 'already_called'
+  | 'not_authorized'
+  | 'budget_exhausted';
+
+export type ManualCallResult =
+  | { ok: true; businessName: string }
+  | { ok: false; refusal: ManualCallRefusal; reason: string };
+
+/**
+ * Calls a business the user chose from the list Dial found.
+ *
+ * Dial rings the ones it ranked highest, which is a judgement, and a judgement
+ * can be wrong: the user can see the whole list and may know something the
+ * ranking does not. This is that override.
+ *
+ * The per-task ceiling deliberately does not apply. That limit exists to stop
+ * Dial working through twenty businesses on its own initiative -- it is a bound
+ * on autonomy, not on the user. The daily budget still applies, because that
+ * one is about real money and a real rate limit, and the policy gate still
+ * applies, because it is the user's own standing instruction about what Dial
+ * may do on the phone.
+ */
+export async function callCandidateNow(
+  ctx: OrchestratorContext,
+  taskId: string,
+  candidateId: string,
+): Promise<ManualCallResult> {
+  const task = await getTask(ctx.db, taskId);
+  if (!task) return { ok: false, refusal: 'task_not_found', reason: 'That task does not exist.' };
+
+  const parsed = dialTaskSchema.safeParse(task.interpreted);
+  if (!parsed.success) {
+    return { ok: false, refusal: 'task_not_found', reason: 'That task is not ready to call from.' };
+  }
+  const dialTask = parsed.data;
+
+  const policy = await getUserPolicy(ctx.db, task.userId);
+  const verdict = canPlaceCalls({ policy, task: dialTask });
+  if (!verdict.allowed) {
+    return { ok: false, refusal: 'not_authorized', reason: verdict.reason };
+  }
+
+  const ranked = await listCandidates(ctx.db, taskId);
+  const chosen = ranked.find((r) => r.candidate.id === candidateId);
+  if (!chosen) {
+    return {
+      ok: false,
+      refusal: 'candidate_not_found',
+      reason: 'That business is not part of this task.',
+    };
+  }
+
+  const phone = chosen.candidate.phoneE164;
+  if (!phone || !isValidE164(phone) || isBlockedNumber(phone)) {
+    return {
+      ok: false,
+      refusal: 'no_phone',
+      reason: `Dial has no number it can dial for ${chosen.candidate.name}.`,
+    };
+  }
+
+  // Read the rows rather than the presentation shape: the wave number decides
+  // which dispatch job picks this up, and it is not part of the UI record.
+  const existing = await ctx.db
+    .select({ candidateId: calls.candidateId, wave: calls.wave })
+    .from(calls)
+    .where(eq(calls.taskId, taskId));
+  if (existing.some((c) => c.candidateId === candidateId)) {
+    return {
+      ok: false,
+      refusal: 'already_called',
+      reason: `Dial has already called ${chosen.candidate.name}.`,
+    };
+  }
+
+  const budget = await reserveCallBudget(
+    ctx.db,
+    task.userId,
+    1,
+    ctx.config.limits.maxCallsPerUserPerDay,
+  );
+  if (budget.granted === 0) {
+    return {
+      ok: false,
+      refusal: 'budget_exhausted',
+      reason: "You've reached today's limit on calls Dial can place. It resets tomorrow.",
+    };
+  }
+
+  const wave = Math.max(0, ...existing.map((c) => c.wave)) + 1;
+  await ctx.db
+    .insert(calls)
+    .values({
+      id: newId('call'),
+      taskId,
+      candidateId,
+      businessName: chosen.candidate.name,
+      phoneE164: phone,
+      idempotencyKey: callIdempotencyKey(taskId, candidateId, 1),
+      disposition: 'pending',
+      wave,
+    })
+    // The same key means this exact business has already been queued for this
+    // task, so a double-tap adds nothing rather than dialling twice.
+    .onConflictDoNothing();
+
+  await markSelected(ctx.db, [candidateId]);
+  // The task may have finished. Reopening it is the honest state: a call is
+  // about to be placed, and the earlier result no longer describes the whole
+  // of what Dial did.
+  await setState(ctx, taskId, 'calling', `You asked Dial to call ${chosen.candidate.name}`);
+  incrementCounter('calls.user_chosen');
+
+  await enqueueJob(
+    ctx.db,
+    'task.dispatch_wave',
+    { taskId, wave },
+    { dedupeKey: `wave:${taskId}:${wave}` },
+  );
+  return { ok: true, businessName: chosen.candidate.name };
 }
 
 /* --------------------------------------------------------------- compare */
@@ -1407,6 +1850,7 @@ export async function handleCompare(
 
   await notify(ctx.db, task.userId, task.id, 'Your Dial result is ready', result.headline);
   ctx.publish(task.id, { type: 'result', taskId: task.id, at: new Date().toISOString() });
+
 }
 
 /* --------------------------------------------------------------- timeout */
@@ -1418,6 +1862,41 @@ export async function handleTimeout(
   const task = await getTask(ctx.db, payload.taskId);
   if (!task) return;
   if (['completed', 'partially_completed', 'failed', 'canceled'].includes(task.state)) return;
+
+  /*
+   * Only give up if nothing is happening.
+   *
+   * This used to fire a fixed fifteen minutes after the first call regardless
+   * of progress. That was survivable when Dial rang three businesses at once;
+   * ringing them one at a time, a task working properly through its list ran
+   * past the deadline and had six businesses marked failed having never been
+   * dialled at all. Waiting your turn is not being stuck.
+   */
+  const [latest] = await ctx.db
+    .select({ at: taskEvents.createdAt })
+    .from(taskEvents)
+    .where(eq(taskEvents.taskId, task.id))
+    .orderBy(desc(taskEvents.createdAt))
+    .limit(1);
+
+  const sinceProgress = latest?.at ? Date.now() - new Date(latest.at).getTime() : Infinity;
+  if (sinceProgress < ctx.config.limits.stallTimeoutMs) {
+    logger.info('task is still making progress, extending the safety net', {
+      taskId: task.id,
+      secondsSinceProgress: Math.round(sinceProgress / 1000),
+    });
+    await enqueueJob(
+      ctx.db,
+      'task.timeout',
+      { taskId: task.id },
+      {
+        runAt: new Date(Date.now() + ctx.config.limits.stallTimeoutMs),
+        // A fresh key: the one this job holds is not released until it ends.
+        dedupeKey: `timeout:${task.id}:${Date.now()}`,
+      },
+    );
+    return;
+  }
 
   const stuck = await ctx.db
     .select()

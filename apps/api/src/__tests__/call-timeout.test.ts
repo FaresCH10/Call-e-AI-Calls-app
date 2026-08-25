@@ -171,7 +171,7 @@ describe('when a business does not answer', () => {
     }
   });
 
-  it('respects the per-task ceiling rather than working through every business', async () => {
+  it('stops somewhere rather than working through every business', async () => {
     h = await createHarness({
       provider: neverAnswers,
       env: {
@@ -179,6 +179,10 @@ describe('when a business does not answer', () => {
         CALL_ANSWER_TIMEOUT_MS: '30000',
         CALL_MAX_ATTEMPTS_PER_BUSINESS: '2',
         MAX_CALLS_PER_TASK: '2',
+        // Nobody answers here, so Dial keeps trying other businesses rather
+        // than stopping at the ordinary ceiling with nothing to show. This is
+        // the bound on that persistence.
+        MAX_CALLS_UNTIL_RESULT: '4',
         CALL_WAVE_SIZE: '1',
       },
       discovery: stubDiscovery({
@@ -197,9 +201,11 @@ describe('when a business does not answer', () => {
     }
 
     const rows = await h.handle.db.select().from(calls).where(eq(calls.taskId, created.id));
-    // Eight businesses were available; the ceiling is what stops Dial working
-    // through all of them.
-    expect(rows.length).toBeLessThanOrEqual(2);
+    // Eight businesses were available. Dial tried past the ordinary ceiling
+    // because nothing usable had come back, and still stopped well short of
+    // ringing all of them.
+    expect(rows.length).toBeGreaterThan(2);
+    expect(rows.length).toBeLessThanOrEqual(4);
 
     const detail = await getTaskDetail(h, token, created.id);
     expect(['completed', 'partially_completed', 'failed']).toContain(detail.state);

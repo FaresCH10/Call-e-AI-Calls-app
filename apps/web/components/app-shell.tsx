@@ -69,6 +69,10 @@ export function AppShell({
             <TargetIcon size={20} />
             Results
           </Link>
+          <Link href="/contacts" className="nav-item" aria-current={isCurrent('/contacts')}>
+            <TargetIcon size={20} />
+            Contacts
+          </Link>
         </div>
 
         <div className="nav-divider" />

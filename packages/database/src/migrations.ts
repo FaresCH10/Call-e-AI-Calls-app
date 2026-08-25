@@ -303,4 +303,34 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS call_language text;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS country_code text;
 `,
   },
+  {
+    id: '0005_contacts_and_direct_dial',
+    sql: `
+-- A number named in the request itself. Present means there is nothing to
+-- search for, so Dial never asks the user where to look.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS direct_phone text;
+
+-- Numbers the user chose to keep, renameable so they mean something later.
+CREATE TABLE IF NOT EXISTS contacts (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  phone_e164 text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Saving a number already kept is a rename, not a duplicate.
+CREATE UNIQUE INDEX IF NOT EXISTS contacts_user_phone ON contacts (user_id, phone_e164);
+CREATE INDEX IF NOT EXISTS contacts_user_idx ON contacts (user_id, name);
+`,
+  },
+  {
+    id: '0006_call_purpose',
+    sql: `
+-- How many times Dial has asked what a direct call is for, so an unclear
+-- answer can be met with another question without looping forever.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS purpose_asks integer NOT NULL DEFAULT 0;
+`,
+  },
 ];

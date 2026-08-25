@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { createDatabase, runMigrations, type DatabaseHandle } from '../client.js';
 import { enqueueJob, claimJobs, completeJob, failJob, reclaimStaleJobs, queueDepth } from '../queue.js';
@@ -114,5 +114,56 @@ describe('queue', () => {
 
     const reclaimed = await claimJobs(handle.db, 'worker-b', 10);
     expect(reclaimed.some((j) => j.id === job!.id)).toBe(true);
+  });
+});
+
+/**
+ * A dedupe key reserves a slot while work is outstanding, not forever.
+ *
+ * The unique index covers every row regardless of state, so a completed job
+ * used to hold its key permanently and the same work could never be queued
+ * again. That stranded tasks: answering a question after the search had run
+ * re-interpreted the task, the second `research:<taskId>` insert was silently
+ * dropped, and the task sat in `interpreting` with nothing after "Understanding
+ * request" in the progress list.
+ */
+describe('dedupe keys and finished jobs', () => {
+  // The suite shares one database, so start from an empty queue: otherwise
+  // `claimJobs` picks up whatever an earlier test left behind.
+  beforeEach(async () => {
+    await handle.db.execute(sql`DELETE FROM jobs`);
+  });
+
+  it('refuses a duplicate while the first is still outstanding', async () => {
+    const first = await enqueueJob(handle.db, 'task.research', { taskId: 't1' }, { dedupeKey: 'research:t1' });
+    const second = await enqueueJob(handle.db, 'task.research', { taskId: 't1' }, { dedupeKey: 'research:t1' });
+    expect(first).toBeTruthy();
+    expect(second).toBeNull();
+  });
+
+  it('allows the same work to be queued again once it has completed', async () => {
+    await enqueueJob(handle.db, 'task.research', { taskId: 't2' }, { dedupeKey: 'research:t2' });
+    const [claimed] = await claimJobs(handle.db, 'worker-1', 1);
+    await completeJob(handle.db, claimed!.id);
+
+    const again = await enqueueJob(handle.db, 'task.research', { taskId: 't2' }, { dedupeKey: 'research:t2' });
+    expect(again).toBeTruthy();
+  });
+
+  it('allows it again once the job has died', async () => {
+    // A job that exhausted its retries must not block a later, legitimate
+    // attempt at the same work.
+    await enqueueJob(
+      handle.db,
+      'task.research',
+      { taskId: 't3' },
+      { dedupeKey: 'research:t3', maxAttempts: 1 },
+    );
+    const [claimed] = await claimJobs(handle.db, 'worker-1', 1);
+    const outcome = await failJob(handle.db, { ...claimed!, attempts: 5 }, new Error('boom'));
+    expect(outcome).toBe('dead');
+
+    const again = await enqueueJob(handle.db, 'task.research', { taskId: 't3' }, { dedupeKey: 'research:t3' });
+    expect(again).toBeTruthy();
   });
 });

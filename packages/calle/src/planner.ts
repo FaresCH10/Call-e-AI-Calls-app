@@ -42,6 +42,12 @@ export function buildCallBrief(input: CallPlanInput): string {
 
   lines.push(``, `WHY`);
   lines.push(sanitizeExternalText(task.objective, 400));
+  // Stated in the user's own words for a call to somebody they named. The
+  // objective is Dial's paraphrase; this is what they actually asked for, and
+  // it is the only thing the agent has to go on when nothing was searched for.
+  if (task.callPurpose) {
+    lines.push(`The caller asked specifically: ${sanitizeExternalText(task.callPurpose, 300)}`);
+  }
 
   lines.push(``, `WHAT YOU MUST FIND OUT`);
   for (const question of questionsFor(family, task)) lines.push(`- ${question}`);
@@ -99,6 +105,35 @@ export function buildCallBrief(input: CallPlanInput): string {
     lines.push(`- If you reach voicemail, end the call without leaving a message.`);
   }
 
+  /*
+   * Written after a real call ran to fifteen exchanges against a recorded
+   * message. The recording said, three ways, that the restaurant could not
+   * help by telephone and to use the website. Dial rephrased the same question
+   * each time, waited, said "I'll hold", and asked again -- for minutes, at
+   * the customer's expense, against a machine.
+   *
+   * Nothing in the brief was wrong; there was simply nothing in it about when
+   * to stop. "Do not argue or call back repeatedly" reads as advice about
+   * manner, not as a stop condition, so the agent kept being polite and kept
+   * going.
+   */
+  lines.push(``, `WHEN TO END THE CALL`);
+  lines.push(
+    `- Ask for what you need at most twice. If the second reply does not answer it, thank them and end the call.`,
+  );
+  lines.push(
+    `- If they say they cannot help by phone, or send you to a website, an email address, a live chat or a form: thank them, end the call, and record that they would not answer by phone. Do not rephrase and try again.`,
+  );
+  lines.push(
+    `- If two replies say substantially the same thing, you are talking to a recording or a script. Thank them and end the call. Asking a recording again cannot work.`,
+  );
+  lines.push(
+    `- If they ask you to hold, wait once. Do not repeat your question while waiting, and do not wait a second time.`,
+  );
+  lines.push(
+    `- Ending politely with no answer is a good outcome. A long call that annoys somebody is not, and it is worse than "unknown" because it costs the customer their reputation with that business.`,
+  );
+
   lines.push(``, `IF THEY ASK SOMETHING UNEXPECTED`);
   lines.push(
     `Answer only from what you know above. If you cannot, say plainly that you will pass the question back to the customer. It is always better to return "unknown" than to guess.`,
@@ -107,6 +142,9 @@ export function buildCallBrief(input: CallPlanInput): string {
   lines.push(``, `RECORDING THE ANSWER`);
   lines.push(
     `Fill in the structured result honestly. Use "unknown" wherever the business did not clearly answer. Do not turn a vague or non-committal reply into a definite yes or a firm price.`,
+  );
+  lines.push(
+    `If they refused, or could only direct you elsewhere, say so in the refusal or evidence field in their own words -- "only takes enquiries via the website". That is a real answer about this business and the customer can act on it. "Unknown" with no reason is not.`,
   );
 
   return lines.join('\n');

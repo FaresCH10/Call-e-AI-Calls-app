@@ -1,4 +1,4 @@
-import { parsePhoneNumberFromString, type CountryCode } from 'libphonenumber-js';
+import { parsePhoneNumberFromString, findNumbers, type CountryCode } from 'libphonenumber-js';
 
 /**
  * Phone handling. The rule: a number either normalises to valid E.164 or it is
@@ -91,4 +91,63 @@ export function businessNameKey(name: string): string {
     .replace(/\b(ltd|limited|inc|llc|plc|gmbh|co|company|the)\b/g, '')
     .replace(/[^a-z0-9]/g, '')
     .trim();
+}
+
+/**
+ * A phone number the user typed into their own request.
+ *
+ * When somebody says "call +971 56 341 8581 and ask about my order" they have
+ * already answered the question the whole search stage exists to answer. Asking
+ * them where to look would be absurd -- there is nothing to look for.
+ *
+ * Found in code rather than asked of the model. A phone number is a precisely
+ * specified pattern with a library that validates it, so extraction is exact
+ * and testable, where a model would occasionally return a price or an order
+ * number and Dial would ring it.
+ */
+export interface DialTarget {
+  e164: string;
+  /** Exactly as the user wrote it, for showing back to them. */
+  raw: string;
+  /** ISO 3166-1 alpha-2 the number belongs to, when it can be determined. */
+  country: string | null;
+}
+
+export function extractDialTargets(
+  text: string | null | undefined,
+  defaultCountry?: string | null,
+): DialTarget[] {
+  const source = (text ?? '').trim();
+  if (!source) return [];
+
+  const region = defaultCountry?.toUpperCase();
+  const found = [
+    // International form needs no hint and is unambiguous, so it goes first.
+    ...safeFind(source, undefined),
+    // A national form only resolves with a country to read it against.
+    ...(region ? safeFind(source, region as CountryCode) : []),
+  ];
+
+  const seen = new Set<string>();
+  const targets: DialTarget[] = [];
+  for (const match of found) {
+    const e164 = match.number.number;
+    if (seen.has(e164) || isBlockedNumber(e164)) continue;
+    seen.add(e164);
+    targets.push({
+      e164,
+      raw: source.slice(match.startsAt, match.endsAt),
+      country: match.number.country ?? null,
+    });
+  }
+  return targets;
+}
+
+function safeFind(text: string, region: CountryCode | undefined) {
+  try {
+    return findNumbers(text, region ? { defaultCountry: region, v2: true } : { v2: true });
+  } catch {
+    // A malformed hint must not stop the rest of the request being read.
+    return [];
+  }
 }
