@@ -61,6 +61,11 @@ exercised are marked PASS.
 | A directory timeout retries instead of failing | PASS | Overpass mirror + queue backoff |
 | A country is refused as too coarse to search | PASS | `finland` -> country/1181 km -> asks for a town instead of reporting no shops exist |
 | Zero results widens the radius before giving up | PASS | 4x, capped at 50 km |
+| The intended typeface actually loads | PASS | Self-hosted woff2 preloaded; variable chain resolves in the served CSS |
+| Every text pair meets WCAG AA in both themes | PASS | Checked from the stylesheet's own token values, not a copy |
+| Keyboard focus is visible on inputs | PASS | `outline: none` on :focus was outranking the global rule |
+| The live indicator animates | PASS | Its keyframe did not exist |
+| Touch targets reach 44px on touch devices | PASS | `@media (pointer: coarse)`, not on desktop |
 | "We could not get an answer" is not filed as an answer | PASS | `question_answered: no` -> `answered_no_answer_to_question` |
 | "This shop cannot help" is still a real answer | PASS | `can_repair: no` -> `answered_useful` |
 | A non-answer never becomes the best verified option | PASS | `result.best` stays null |

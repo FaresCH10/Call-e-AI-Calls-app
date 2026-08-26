@@ -110,6 +110,66 @@ describe('when to end the call', () => {
   });
 });
 
+describe('not asking the same thing twice', () => {
+  // One real call asked the same two questions four times, rephrasing each
+  // time while the business answered "yes" and grew confused. The brief said
+  // nothing about tracking what had already been answered.
+  it('forbids re-asking an answered question, even in different words', () => {
+    expect(brief()).toMatch(/Never ask the same question twice/i);
+    expect(brief()).toMatch(/Rephrasing the same question counts as asking again/i);
+  });
+
+  it('accepts "unknown" from a garbled reply instead of rephrasing', () => {
+    expect(brief()).toMatch(/record it as "unknown" in the structured result/i);
+  });
+
+  it('asks one question at a time', () => {
+    expect(brief()).toMatch(/One question at a time/i);
+  });
+
+  it('ends the call once the answers are in, instead of inventing follow-ups', () => {
+    expect(brief()).toMatch(/Do not invent follow-up questions/i);
+  });
+
+  it('does not restate the objective as a second thing to ask about', () => {
+    // The WHY section carries the objective; a checklist repeating it made
+    // the agent treat one request as two topics and cycle between them.
+    expect(brief()).not.toMatch(/WHAT YOU MUST FIND OUT/);
+  });
+
+  it('still lists real questions for families that have them', () => {
+    const text = buildCallBrief({
+      task: { ...TASK, taskFamily: 'quote_request' },
+      family: getCallFamily('repair_quote'),
+      candidate: {
+        id: 'c1',
+        name: "Bill's",
+        category: 'restaurant',
+        address: null,
+        latitude: null,
+        longitude: null,
+        phoneE164: '+442071234567',
+        phoneRaw: '020 7123 4567',
+        website: null,
+        source: 'osm',
+        sourceUrl: null,
+        rating: null,
+        reviewCount: null,
+        distanceMeters: null,
+        openingHours: null,
+        phoneVerified: false,
+        verificationSources: [],
+      },
+      policy: DEFAULT_USER_POLICY,
+      mayCommit: false,
+      userFacts: {},
+      userDisplayName: null,
+    });
+    expect(text).toMatch(/WHAT YOU MUST FIND OUT/);
+    expect(text).toMatch(/Whether they can repair/);
+  });
+});
+
 describe('what the brief has always had to say', () => {
   it('discloses that this is an AI, before anything else', () => {
     const text = brief();

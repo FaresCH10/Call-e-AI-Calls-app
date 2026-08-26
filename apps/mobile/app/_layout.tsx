@@ -2,12 +2,14 @@ import { Stack } from 'expo-router';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { AuthProvider } from '../lib/auth';
+import { PushTapRouter } from '../components/push-tap';
 import { colors } from '../lib/theme';
 
 export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <AuthProvider>
+        <PushTapRouter />
         <StatusBar style="auto" />
         <Stack
           screenOptions={{

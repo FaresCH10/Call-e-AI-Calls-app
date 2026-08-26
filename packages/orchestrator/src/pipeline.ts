@@ -14,8 +14,10 @@ import {
   getCallFamily,
   describeCalleError,
   dialTaskSchema,
+  isTerminalTaskState,
   type CallFamilyId,
   type DialTask,
+  type TaskState,
   type CallDisposition,
   type TaskResult,
   type BusinessCandidate,
@@ -61,6 +63,7 @@ import {
   notify,
   audit,
   reserveCallBudget,
+  releaseCallBudget,
   rowToCandidate,
 } from './repo.js';
 import { InterpreterUnavailableError } from '@dial/ai';
@@ -165,6 +168,10 @@ export async function handleInterpret(
   // the ranking layer and the call brief.
   const answers = (task.clarifyingAnswers ?? {}) as Record<string, string>;
   for (const [key, value] of Object.entries(answers)) {
+    // The language answer routes calls, it is not a requirement to state at
+    // businesses -- folding it into the brief produced lines like
+    // "call language: Arabic" that the agent had to silently ignore.
+    if (key === CALL_LANGUAGE_QUESTION_ID) continue;
     if (typeof value === 'string' && value.trim()) {
       dialTask.constraints.additional[key] = value.trim();
     }
@@ -565,6 +572,7 @@ async function recentCountryFor(db: Db, userId: string): Promise<string | null> 
     .limit(1);
   return rows[0]?.countryCode ?? null;
 }
+export { recentCountryFor };
 
 /* -------------------------------------------------------------- research */
 
@@ -573,7 +581,11 @@ export async function handleResearch(
   payload: { taskId: string },
 ): Promise<void> {
   const task = await getTask(ctx.db, payload.taskId);
-  if (!task) return;
+  // A canceled or finished task must not keep working its way through the
+  // pipeline: jobs are already queued when the user cancels, and discovery,
+  // planning and dispatch would otherwise run to completion — dialling real
+  // phones for a request the user withdrew.
+  if (!task || isTerminalTaskState(task.state as TaskState)) return;
   const parsed = dialTaskSchema.safeParse(task.interpreted);
   if (!parsed.success) return;
   const dialTask = parsed.data;
@@ -882,7 +894,9 @@ export async function handlePlanCalls(
   payload: { taskId: string },
 ): Promise<void> {
   const task = await getTask(ctx.db, payload.taskId);
-  if (!task) return;
+  // Same guard as research: a job queued before a cancellation must not plan,
+  // reserve budget for, or dispatch calls on a task the user withdrew.
+  if (!task || isTerminalTaskState(task.state as TaskState)) return;
   const parsed = dialTaskSchema.safeParse(task.interpreted);
   if (!parsed.success) return;
   const dialTask = parsed.data;
@@ -1006,18 +1020,42 @@ async function requestAuthorization(
   input: { kind: string; prompt: string; details: Record<string, unknown> },
 ): Promise<void> {
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-  await ctx.db.insert(authorizationRequests).values({
-    id: newId('auth'),
-    taskId,
-    userId,
-    kind: input.kind,
-    prompt: input.prompt,
-    details: input.details,
-    state: 'pending',
-    expiresAt,
-  });
+  // One outstanding request per task. A retried plan job used to insert a
+  // second pending row, and approving the first left the duplicate sitting
+  // there forever, resurfacing in the UI as an approval that was never asked
+  // for again.
+  const existing = await ctx.db
+    .select({ id: authorizationRequests.id })
+    .from(authorizationRequests)
+    .where(
+      and(eq(authorizationRequests.taskId, taskId), eq(authorizationRequests.state, 'pending')),
+    )
+    .limit(1);
+
+  if (existing[0]) {
+    await ctx.db
+      .update(authorizationRequests)
+      .set({
+        kind: input.kind,
+        prompt: input.prompt,
+        details: input.details,
+        expiresAt,
+      })
+      .where(eq(authorizationRequests.id, existing[0].id));
+  } else {
+    await ctx.db.insert(authorizationRequests).values({
+      id: newId('auth'),
+      taskId,
+      userId,
+      kind: input.kind,
+      prompt: input.prompt,
+      details: input.details,
+      state: 'pending',
+      expiresAt,
+    });
+  }
   await setState(ctx, taskId, 'awaiting_confirmation', input.prompt);
-  await notify(ctx.db, userId, taskId, 'Dial needs your approval', input.prompt);
+  await notify(ctx, userId, taskId, 'Dial needs your approval', input.prompt);
 }
 
 /* --------------------------------------------------------- dispatch wave */
@@ -1027,7 +1065,9 @@ export async function handleDispatchWave(
   payload: { taskId: string; wave: number },
 ): Promise<void> {
   const task = await getTask(ctx.db, payload.taskId);
-  if (!task) return;
+  // The last place a queued job can be stopped. Without this, a wave claimed
+  // just before a cancellation rang real phones for a withdrawn task.
+  if (!task || isTerminalTaskState(task.state as TaskState)) return;
   const parsed = dialTaskSchema.safeParse(task.interpreted);
   if (!parsed.success) return;
   const dialTask = parsed.data;
@@ -1036,11 +1076,20 @@ export async function handleDispatchWave(
   const policy = await getUserPolicy(ctx.db, task.userId);
   const settings = await getSettings(ctx.db, task.userId);
 
+  // Only rows still awaiting dispatch. Filtering on disposition as well as the
+  // missing provider id matters: compare marks never-needed rows `not_needed`
+  // and cancel marks them off, and neither must ever be dialled by a wave job
+  // that was already in flight when that happened.
   const pending = await ctx.db
     .select()
     .from(calls)
     .where(
-      and(eq(calls.taskId, task.id), eq(calls.wave, payload.wave), isNull(calls.providerCallId)),
+      and(
+        eq(calls.taskId, task.id),
+        eq(calls.wave, payload.wave),
+        eq(calls.disposition, 'pending'),
+        isNull(calls.providerCallId),
+      ),
     );
 
   if (pending.length === 0) {
@@ -1226,9 +1275,22 @@ export async function handlePollCall(
   const rows = await ctx.db.select().from(calls).where(eq(calls.id, payload.callId)).limit(1);
   const call = rows[0];
   if (!call || !call.providerCallId) return;
-  // A call abandoned on the answer budget is still watched: it cannot be
-  // cancelled, so it may yet produce the answer the task was asked for.
+
+  // Stop watching once the task is over and this call is no longer pending:
+  // a terminal task's finished calls need no more polls, and without this the
+  // per-call poll chain ran forever. A call still pending on a terminal task
+  // keeps being watched — it cannot be cancelled, so its real result is still
+  // worth recording.
+  const task = await getTask(ctx.db, payload.taskId);
   const abandoned = call.failureCode === 'answer_timeout';
+  if (!task) return;
+  if (
+    isTerminalTaskState(task.state as TaskState) &&
+    call.disposition !== 'pending' &&
+    !abandoned
+  ) {
+    return;
+  }
   if (call.disposition !== 'pending' && !abandoned) {
     await maybeAdvance(ctx, payload.taskId);
     return;
@@ -1279,7 +1341,7 @@ export async function handlePollCall(
       // Note what this is NOT: CALL-E exposes no way to cancel a call in
       // flight, so the phone may still be ringing. Dial stops waiting; it
       // cannot stop the call. The wording reflects that.
-      await ctx.db
+      const marked = await ctx.db
         .update(calls)
         .set({
           disposition: 'no_answer',
@@ -1287,15 +1349,22 @@ export async function handlePollCall(
           failureMessage: `No answer within ${Math.round(budgetMs / 1000)} seconds.`,
           completedAt: new Date().toISOString(),
         })
-        .where(and(eq(calls.id, call.id), eq(calls.disposition, 'pending')));
+        .where(and(eq(calls.id, call.id), eq(calls.disposition, 'pending')))
+        .returning({ id: calls.id });
 
-      incrementCounter('calls.answer_timeout');
-      await addEvent(
-        ctx,
-        payload.taskId,
-        'calling',
-        `${call.businessName}: no answer after ${Math.round(budgetMs / 1000)}s — trying another business`,
-      );
+      // The update only matches the first time. Without gating on it, every
+      // later poll of an abandoned call re-announced "no answer" and inflated
+      // the counter while the row had moved on already.
+      if (marked.length > 0) {
+        incrementCounter('calls.answer_timeout');
+        await addEvent(
+          ctx,
+          payload.taskId,
+          'calling',
+          `${call.businessName}: no answer after ${Math.round(budgetMs / 1000)}s — trying another business`,
+        );
+        await maybeAdvance(ctx, payload.taskId);
+      }
       // Keep watching anyway. Dial has moved on to another business, but the
       // phone may still be ringing and the result is worth having if it comes.
       await enqueueJob(
@@ -1307,7 +1376,6 @@ export async function handlePollCall(
           dedupeKey: `poll:${call.id}:${Date.now()}`,
         },
       );
-      await maybeAdvance(ctx, payload.taskId);
       return;
     }
 
@@ -1694,6 +1762,17 @@ export async function callCandidateNow(
 ): Promise<ManualCallResult> {
   const task = await getTask(ctx.db, taskId);
   if (!task) return { ok: false, refusal: 'task_not_found', reason: 'That task does not exist.' };
+  // A withdrawn request stays withdrawn. Reopening a *finished* task to ring
+  // someone again is deliberate (below); resurrecting one the user cancelled
+  // -- including a cancellation that was really a denied authorization -- is
+  // not, and used to end up on the phone with a committing brief attached.
+  if (task.state === 'canceled') {
+    return {
+      ok: false,
+      refusal: 'not_authorized',
+      reason: 'You canceled that task. Create a new request instead.',
+    };
+  }
 
   const parsed = dialTaskSchema.safeParse(task.interpreted);
   if (!parsed.success) {
@@ -1705,6 +1784,33 @@ export async function callCandidateNow(
   const verdict = canPlaceCalls({ policy, task: dialTask });
   if (!verdict.allowed) {
     return { ok: false, refusal: 'not_authorized', reason: verdict.reason };
+  }
+
+  /*
+   * The override skips the autonomy ceiling, never the authorization gate.
+   *
+   * Dispatch derives mayCommit from the task's requested side effect alone, so
+   * without this check a hand-picked business on a reservation or appointment
+   * task went out with a brief saying "you may book" -- even when the user's
+   * settings said never, or when the automatic path would have stopped and
+   * asked first. The same rule as handlePlanCalls applies here: refused means
+   * refused, and anything needing confirmation needs an approved request.
+   */
+  const sideEffect = canPerformSideEffect({ policy, task: dialTask });
+  if (!sideEffect.allowed) {
+    return { ok: false, refusal: 'not_authorized', reason: sideEffect.reason };
+  }
+  if (sideEffect.requiresConfirmation) {
+    const approved = await ctx.db
+      .select({ id: authorizationRequests.id })
+      .from(authorizationRequests)
+      .where(
+        and(eq(authorizationRequests.taskId, taskId), eq(authorizationRequests.state, 'approved')),
+      )
+      .limit(1);
+    if (!approved.length) {
+      return { ok: false, refusal: 'not_authorized', reason: sideEffect.reason };
+    }
   }
 
   const ranked = await listCandidates(ctx.db, taskId);
@@ -1794,7 +1900,9 @@ export async function handleCompare(
   payload: { taskId: string },
 ): Promise<void> {
   const task = await getTask(ctx.db, payload.taskId);
-  if (!task) return;
+  // A task cancelled or failed while this job sat queued must not be
+  // resurrected as "completed" with a result the user already withdrew from.
+  if (!task || isTerminalTaskState(task.state as TaskState)) return;
   const parsed = dialTaskSchema.safeParse(task.interpreted);
   if (!parsed.success) return;
 
@@ -1804,7 +1912,7 @@ export async function handleCompare(
   // had enough answers, must not sit in the UI as "In progress" forever. The
   // row stays -- it is a real part of the plan and part of the evidence trail --
   // but it stops claiming a call is under way.
-  await ctx.db
+  const skipped = await ctx.db
     .update(calls)
     .set({
       disposition: 'not_needed',
@@ -1817,7 +1925,14 @@ export async function handleCompare(
         eq(calls.disposition, 'pending'),
         isNull(calls.providerCallId),
       ),
-    );
+    )
+    .returning({ id: calls.id });
+
+  // Those rows reserved real daily budget when they were planned. A number
+  // Dial never dialled should not spend the user's ceiling for the day.
+  if (skipped.length > 0) {
+    await releaseCallBudget(ctx.db, task.userId, skipped.length);
+  }
 
   const family = getCallFamily((task.callFamily as CallFamilyId) ?? 'general_inquiry');
   const callRecords = await listCalls(ctx.db, task.id);
@@ -1848,7 +1963,7 @@ export async function handleCompare(
   observe('task.calls_per_task', result.tally.contacted, {});
   incrementCounter('task.finished', { state });
 
-  await notify(ctx.db, task.userId, task.id, 'Your Dial result is ready', result.headline);
+  await notify(ctx, task.userId, task.id, 'Your Dial result is ready', result.headline);
   ctx.publish(task.id, { type: 'result', taskId: task.id, at: new Date().toISOString() });
 
 }
@@ -1969,7 +2084,7 @@ export async function failTask(
   incrementCounter('task.failed', { code });
   const task = await getTask(ctx.db, taskId);
   if (task) {
-    await notify(ctx.db, task.userId, taskId, "Dial couldn't finish that", message);
+    await notify(ctx, task.userId, taskId, "Dial couldn't finish that", message);
   }
 }
 

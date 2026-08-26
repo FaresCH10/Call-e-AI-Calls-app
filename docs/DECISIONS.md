@@ -1039,3 +1039,39 @@ exactly what it now measures.
 Worth noting how this was found. It was not the reported problem -- the question
 was who had hung up on a Paris bakery -- and it surfaced only because answering
 that meant reading the real call records rather than reasoning about the code.
+
+## 53. The design was never the one that was designed
+
+`--font-sans` named Inter. Nothing anywhere loaded Inter. Every screen had been
+rendering in whatever the operating system defaulted to -- Segoe UI on Windows,
+Helvetica on a Mac -- and no two people reviewing it had been looking at the
+same thing.
+
+It is now Plus Jakarta Sans, built into the bundle by `next/font` rather than
+fetched from Google at runtime: one less origin to depend on, no render-blocking
+request, and a matched fallback so text is readable immediately and does not
+jump when the real face arrives.
+
+Three other things were broken rather than merely dated:
+
+**The focus ring was cancelled on every input.** `.field input:focus` set
+`outline: none` and changed only the border colour. It outranked the global
+`:focus-visible` rule, so keyboard users lost the indicator in the one place it
+matters most -- a form. Focus styling now lives on `:focus-visible` and pairs a
+border colour with a ring.
+
+**The live indicator never moved.** The component asked for
+`animation: pulse`, nothing defined `pulse`, and the dot meaning "this is
+happening right now" sat perfectly still.
+
+**Two colours failed WCAG AA.** Muted text was 3.03:1 -- that is card labels,
+tallies and timestamps. And the indigo everyone reaches for, `#6366F1`, is
+4.47:1: close enough to look fine and close enough to fail. Every text pair is
+now checked against 4.5:1 in both themes by a script rather than by eye, which
+caught two more that a glance had passed: the muted grey cleared 4.5 on white
+and failed on the canvas it actually sits on, and white on the dark-mode primary
+button was 4.47.
+
+Touch targets grow to 44px under `@media (pointer: coarse)` rather than
+everywhere. A 34px icon button is comfortable with a mouse and a nuisance with a
+thumb; the guidance is about fingers, so the query asks about the pointer.

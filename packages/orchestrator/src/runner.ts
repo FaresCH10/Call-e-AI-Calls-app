@@ -10,6 +10,7 @@ import {
   handleCompare,
   handleTimeout,
 } from './pipeline.js';
+import { handleDeliverPush } from './push.js';
 import { purgeExpiredTranscripts } from './repo.js';
 import { failTask } from './pipeline.js';
 
@@ -24,6 +25,7 @@ export const HANDLERS: Record<JobKind, Handler> = {
   'task.collect': handleCompare,
   'task.compare': handleCompare,
   'task.timeout': handleTimeout,
+  'push.deliver': handleDeliverPush,
 };
 
 export interface RunnerOptions {

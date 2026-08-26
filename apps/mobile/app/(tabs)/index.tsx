@@ -12,8 +12,9 @@ import {
 import { useRouter } from 'expo-router';
 import * as Location from 'expo-location';
 import { api, ApiError } from '../../lib/api';
-import { colors, radius, spacing, text } from '../../lib/theme';
+import { colors, elevation, radius, spacing, text } from '../../lib/theme';
 import { Button, Notice } from '../../components/ui';
+import { MapPinIcon } from '../../components/icons';
 
 /**
  * The mobile command screen. Same promise as the web composer, laid out for a
@@ -117,8 +118,14 @@ export default function HomeScreen() {
               accessibilityLabel="Use my current location"
               style={styles.locationButton}
             >
+              {/*
+                An SVG pin rather than the 📍 emoji this used to draw: the
+                emoji renders in the system's own colour and shape, which is
+                neither the web's icon nor the same on two phones.
+              */}
+              <MapPinIcon size={16} color={colors.textSecondary} />
               <Text style={{ color: colors.textSecondary, fontSize: text.sm }}>
-                {locationLabel ? `📍 ${locationLabel}` : '📍 Use my location'}
+                {locationLabel ?? 'Use my location'}
               </Text>
             </Pressable>
             <Button
@@ -171,6 +178,7 @@ const styles = StyleSheet.create({
     borderRadius: radius.lg,
     padding: spacing.lg,
     gap: spacing.md,
+    ...elevation.card,
   },
   input: {
     minHeight: 96,
@@ -187,7 +195,9 @@ const styles = StyleSheet.create({
   locationButton: {
     flexShrink: 1,
     minHeight: 44,
-    justifyContent: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
   },
   suggestionsLabel: {
     fontSize: text.xs,

@@ -49,8 +49,31 @@ export function buildCallBrief(input: CallPlanInput): string {
     lines.push(`The caller asked specifically: ${sanitizeExternalText(task.callPurpose, 300)}`);
   }
 
-  lines.push(``, `WHAT YOU MUST FIND OUT`);
-  for (const question of questionsFor(family, task)) lines.push(`- ${question}`);
+  // The default family's only question used to be the objective itself, which
+  // the WHY section already states verbatim. A checklist item that repeats the
+  // objective reads as a second, separate thing to ask about -- one real call
+  // asked the same two questions four times in a row because the brief listed
+  // them twice. Anything that duplicates the objective is dropped, and the
+  // section disappears entirely when nothing distinct remains.
+  const questions = questionsFor(family, task).filter(
+    (question) => normalizeForDedupe(question) !== normalizeForDedupe(task.objective),
+  );
+  if (questions.length > 0) {
+    lines.push(``, `WHAT YOU MUST FIND OUT`);
+    for (const question of questions) lines.push(`- ${question}`);
+  }
+
+  lines.push(``, `HOW TO ASK`);
+  lines.push(`- One question at a time. Wait for the answer before asking the next.`);
+  lines.push(
+    `- Never ask the same question twice, even in different words. If they have answered it, that answer stands -- move to the next thing.`,
+  );
+  lines.push(
+    `- If a reply is unclear, garbled, or does not address the question, record it as "unknown" in the structured result. Do not rephrase and ask again.`,
+  );
+  lines.push(
+    `- When you have everything you were asked to find out -- or they have declined to give it -- thank them and end the call. Do not invent follow-up questions.`,
+  );
 
   const known = knownFacts(task, userFacts, userDisplayName);
   if (known.length) {
@@ -119,7 +142,7 @@ export function buildCallBrief(input: CallPlanInput): string {
    */
   lines.push(``, `WHEN TO END THE CALL`);
   lines.push(
-    `- Ask for what you need at most twice. If the second reply does not answer it, thank them and end the call.`,
+    `- Ask for what you need at most twice. Rephrasing the same question counts as asking again. If the second reply does not answer it, thank them and end the call.`,
   );
   lines.push(
     `- If they say they cannot help by phone, or send you to a website, an email address, a live chat or a form: thank them, end the call, and record that they would not answer by phone. Do not rephrase and try again.`,
@@ -200,8 +223,19 @@ function questionsFor(family: CallFamily, task: DialTask): string[] {
         'Whether it is ready to collect, and the collection hours.',
       ];
     default:
-      return [sanitizeExternalText(task.objective, 200)];
+      // The objective already appears in WHY. Restating it here made the agent
+      // treat it as a second topic and loop through both.
+      return [];
   }
+}
+
+/** Case- and punctuation-insensitive comparison so near-identical lines dedupe. */
+function normalizeForDedupe(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function constraintLines(task: DialTask): string[] {

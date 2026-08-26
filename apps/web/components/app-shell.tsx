@@ -8,6 +8,7 @@ import {
   PlusIcon,
   SearchIcon,
   TargetIcon,
+  ContactsIcon,
   ClockIcon,
   PhoneIcon,
   CardIcon,
@@ -70,7 +71,7 @@ export function AppShell({
             Results
           </Link>
           <Link href="/contacts" className="nav-item" aria-current={isCurrent('/contacts')}>
-            <TargetIcon size={20} />
+            <ContactsIcon size={20} />
             Contacts
           </Link>
         </div>

@@ -25,7 +25,8 @@ export type JobKind =
   | 'task.poll_call'
   | 'task.collect'
   | 'task.compare'
-  | 'task.timeout';
+  | 'task.timeout'
+  | 'push.deliver';
 
 export interface EnqueueOptions {
   runAt?: Date;
@@ -157,9 +158,12 @@ export async function failJob(db: Db, job: QueuedJob, error: unknown): Promise<'
     SET state = 'pending',
         run_at = now() + (${delaySeconds} * interval '1 second'),
         last_error = ${message.slice(0, 2000)},
-        locked_by = NULL,
-        -- A retried job must be re-enqueueable later, so release the dedupe slot.
-        dedupe_key = NULL
+        locked_by = NULL
+        -- The dedupe key is deliberately kept while a retry is outstanding:
+        -- "do not queue this twice while one is in flight" must survive a
+        -- failure, or an API-triggered enqueue and the scheduled retry could
+        -- both run the same stage at once. It is released on completion and
+        -- on death below.
     WHERE id = ${job.id}
   `);
   incrementCounter('queue.retried', { kind: job.kind });

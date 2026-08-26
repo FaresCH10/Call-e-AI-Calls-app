@@ -12,6 +12,7 @@ import {
   usageCounters,
   auditEvents,
   contacts,
+  enqueueJob,
   type Db,
 } from '@dial/database';
 import {
@@ -111,10 +112,30 @@ export async function saveCandidates(
   ranked: RankedCandidate[],
 ): Promise<Map<string, string>> {
   const idMap = new Map<string, string>();
+
+  // The unique (task_id, phone_e164) index makes a re-run of discovery
+  // idempotent for numbered businesses -- but Postgres treats NULLs as distinct,
+  // so candidates without a number matched nothing and a retried research pass
+  // duplicated every one of them. They are deduped here on name instead.
+  const existing = await db
+    .select({ id: businessCandidates.id, name: businessCandidates.name, phoneE164: businessCandidates.phoneE164 })
+    .from(businessCandidates)
+    .where(eq(businessCandidates.taskId, taskId));
+  const byPhone = new Map<string, string>();
+  const byName = new Map<string, string>();
+  for (const row of existing) {
+    if (row.phoneE164) byPhone.set(row.phoneE164, row.id);
+    byName.set(row.name.toLowerCase(), row.id);
+  }
+
   for (const entry of ranked) {
     const c = entry.candidate;
-    // The unique (task_id, phone_e164) index makes a re-run of discovery
-    // idempotent rather than duplicating every business.
+    const knownId = c.phoneE164 ? byPhone.get(c.phoneE164) : byName.get(c.name.toLowerCase());
+    if (knownId) {
+      idMap.set(c.id, knownId);
+      continue;
+    }
+    // The same index still guards the concurrent-insert case.
     const id = newId('cand');
     const inserted = await db
       .insert(businessCandidates)
@@ -143,7 +164,27 @@ export async function saveCandidates(
       .onConflictDoNothing()
       .returning({ id: businessCandidates.id });
 
-    idMap.set(c.id, inserted[0]?.id ?? id);
+    if (inserted[0]?.id) {
+      if (c.phoneE164) byPhone.set(c.phoneE164, inserted[0].id);
+      byName.set(c.name.toLowerCase(), inserted[0].id);
+      idMap.set(c.id, inserted[0].id);
+    } else {
+      // Lost an insert race with another worker; hand back the winner's row
+      // rather than an id that does not exist.
+      const [winner] = await db
+        .select({ id: businessCandidates.id })
+        .from(businessCandidates)
+        .where(
+          and(
+            eq(businessCandidates.taskId, taskId),
+            c.phoneE164
+              ? eq(businessCandidates.phoneE164, c.phoneE164)
+              : eq(businessCandidates.name, c.name),
+          ),
+        )
+        .limit(1);
+      if (winner) idMap.set(c.id, winner.id);
+    }
   }
   return idMap;
 }
@@ -332,6 +373,30 @@ export async function reserveCallBudget(
   return { granted: Math.max(0, Number(result.rows?.[0]?.granted ?? 0)) };
 }
 
+/**
+ * Returns budget to the user's daily counter for calls that were planned but
+ * never dialled. Reserved slots that go unused must not spend the ceiling --
+ * the limit exists to bound real phones rung, and a number Dial skipped rang
+ * nobody.
+ */
+export async function releaseCallBudget(
+  db: Db,
+  userId: string,
+  count: number,
+): Promise<void> {
+  if (count <= 0) return;
+  const day = today();
+  await db
+    .insert(usageCounters)
+    .values({ userId, day, callsPlaced: 0 })
+    .onConflictDoNothing();
+  await db.execute(sql`
+    UPDATE usage_counters
+    SET calls_placed = GREATEST(0, calls_placed - ${count})
+    WHERE user_id = ${userId} AND day = ${day}
+  `);
+}
+
 export async function countTasksToday(db: Db, userId: string): Promise<number> {
   const rows = await db
     .select()
@@ -343,14 +408,27 @@ export async function countTasksToday(db: Db, userId: string): Promise<number> {
 
 /* -------------------------------------------------------------- notifying */
 
+/**
+ * Records a notification and schedules its push delivery.
+ *
+ * The row is the durable record; the job is how it reaches a phone. Delivery
+ * rides the same queue as everything else, so an offline push service retries
+ * with backoff instead of losing the message, and `push.deliver` is
+ * idempotent on the notification's `deliveredAt`.
+ */
 export async function notify(
-  db: Db,
+  ctx: OrchestratorContext,
   userId: string,
   taskId: string,
   title: string,
   body: string,
 ): Promise<void> {
-  await db.insert(notifications).values({ id: newId('ntf'), userId, taskId, title, body });
+  const id = newId('ntf');
+  await ctx.db.insert(notifications).values({ id, userId, taskId, title, body });
+  await enqueueJob(ctx.db, 'push.deliver', { notificationId: id }, {
+    dedupeKey: `push:${id}`,
+    maxAttempts: 5,
+  });
 }
 
 export async function audit(

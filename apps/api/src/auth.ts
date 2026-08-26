@@ -110,12 +110,26 @@ export async function registerUser(
   }
 
   const id = newId('usr');
-  await db.insert(users).values({
-    id,
-    email,
-    name: input.name.trim(),
-    passwordHash: await hashPassword(input.password),
-  });
+  try {
+    await db.insert(users).values({
+      id,
+      email,
+      name: input.name.trim(),
+      passwordHash: await hashPassword(input.password),
+    });
+  } catch (error) {
+    // Two concurrent sign-ups both passed the existence check above; the
+    // unique index settles it. Report that as the friendly conflict rather
+    // than letting a raw driver error become a 500.
+    if ((error as { code?: string }).code === '23505') {
+      const conflict = new Error('An account with that email already exists.') as Error & {
+        statusCode: number;
+      };
+      conflict.statusCode = 409;
+      throw conflict;
+    }
+    throw error;
+  }
   await ensureSettings(db, id);
 
   const rows = await db.select().from(users).where(eq(users.id, id)).limit(1);

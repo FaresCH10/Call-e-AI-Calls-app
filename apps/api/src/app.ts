@@ -3,7 +3,7 @@ import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
-import { eq, and, desc, lt, sql } from 'drizzle-orm';
+import { eq, and, desc, lt, isNull, sql } from 'drizzle-orm';
 import { config as loadConfig, type DialConfig } from '@dial/config';
 import {
   tasks,
@@ -12,6 +12,7 @@ import {
   authorizationRequests,
   calls,
   contacts,
+  pushTokens,
   enqueueJob,
   queueDepth,
   type Db,
@@ -29,6 +30,9 @@ import {
   authorizationDecisionRequestSchema,
   updateSettingsRequestSchema,
   userPolicySchema,
+  pushRegisterRequestSchema,
+  pushUnregisterRequestSchema,
+  importContactsRequestSchema,
   TASK_STATE_LABELS,
   type SessionUser,
   type TaskState,
@@ -46,6 +50,7 @@ import {
   setState,
   audit,
   newId,
+  recentCountryFor,
   type OrchestratorContext,
 } from '@dial/orchestrator';
 import {
@@ -100,14 +105,13 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   });
-  await app.register(rateLimit, {
-    max: 300,
-    timeWindow: '1 minute',
-    keyGenerator: (req) => req.user?.id ?? req.ip,
-  });
 
   /* ------------------------------------------------------------- auth hook */
 
+  // Registered before the rate limiter on purpose: onRequest hooks run in
+  // registration order, and the limiter's keyGenerator reads request.user to
+  // key authenticated traffic per user. Registered after, it always saw an
+  // unresolved user and silently degraded to per-IP limits for everyone.
   app.addHook('onRequest', async (request) => {
     const header = request.headers.authorization;
     const bearer = header?.startsWith('Bearer ') ? header.slice(7) : null;
@@ -119,6 +123,12 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       request.user = user;
       request.sessionToken = token;
     }
+  });
+
+  await app.register(rateLimit, {
+    max: 300,
+    timeWindow: '1 minute',
+    keyGenerator: (req) => req.user?.id ?? req.ip,
   });
 
   function requireUser(request: FastifyRequest, reply: FastifyReply): SessionUser | null {
@@ -147,6 +157,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
         discovery: ctx.discovery.describe(),
         queue: cfg.redisUrl ? 'redis' : 'postgres',
         database: cfg.databaseUrl ? 'postgres' : 'pglite',
+        push: cfg.push.configured,
       },
       queue: depth,
     };
@@ -174,7 +185,19 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       return { user, token: session.token };
     } catch (error) {
       const status = (error as { statusCode?: number }).statusCode ?? 500;
-      return fail(reply, status, status === 409 ? 'email_taken' : 'internal_error', (error as Error).message);
+      // Only messages Dial wrote (the 409) are safe to show. Anything else --
+      // a database error from the unique-index race, a connection failure --
+      // stays on this side of the boundary.
+      const message =
+        status >= 500
+          ? 'Dial could not create that account just now. Please try again shortly.'
+          : (error as Error).message;
+      return fail(
+        reply,
+        status,
+        status === 409 ? 'email_taken' : status >= 500 ? 'internal_error' : 'invalid_request',
+        message,
+      );
     }
   });
 
@@ -339,7 +362,9 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       })
       .where(eq(tasks.id, id));
 
-    await enqueueJob(db, 'task.interpret', { taskId: id }, { dedupeKey: `interpret:${id}:${Date.now()}` });
+    // Stable dedupe key: a double-submit or a retry collapses into the job
+    // that is already queued rather than running two interpretations at once.
+    await enqueueJob(db, 'task.interpret', { taskId: id }, { dedupeKey: `interpret:${id}` });
     const rows = await db.select().from(tasks).where(eq(tasks.id, id)).limit(1);
     return toTaskDetail(db, rows[0]!);
   });
@@ -415,9 +440,13 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     });
 
     if (resumeAtCalling) {
-      await enqueueJob(db, 'task.plan_calls', { taskId: id }, { dedupeKey: `plan:${id}:${Date.now()}` });
+      // Stable key: a retried plan job and this enqueue must collapse, or two
+      // plan runs would both reserve the daily call budget for the same calls.
+      await enqueueJob(db, 'task.plan_calls', { taskId: id }, { dedupeKey: `plan:${id}` });
     } else {
-      await enqueueJob(db, 'task.interpret', { taskId: id }, { dedupeKey: `interpret:${id}:${Date.now()}` });
+      // Stable dedupe key: a double-submit or a retry collapses into the job
+      // that is already queued rather than running two interpretations at once.
+      await enqueueJob(db, 'task.interpret', { taskId: id }, { dedupeKey: `interpret:${id}` });
     }
 
     const rows = await db.select().from(tasks).where(eq(tasks.id, id)).limit(1);
@@ -574,7 +603,9 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
 
     if (parsed.data.approved) {
       await setState(ctx, id, 'planning_calls', 'Approved — Dial is getting started');
-      await enqueueJob(db, 'task.plan_calls', { taskId: id }, { dedupeKey: `plan:${id}:${Date.now()}` });
+      // Stable key, for the same reason as the answers endpoint: two plan
+      // runs must not both spend the daily budget.
+      await enqueueJob(db, 'task.plan_calls', { taskId: id }, { dedupeKey: `plan:${id}` });
     } else {
       await setState(ctx, id, 'canceled', 'You declined, so Dial stopped without calling anyone.', {
         completedAt: new Date().toISOString(),
@@ -606,6 +637,26 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       .where(and(eq(calls.taskId, id), eq(calls.disposition, 'pending')));
     const dialled = inFlight.filter((c) => c.providerCallId).length;
 
+    // Numbers planned but never dialled are released here, not just left for
+    // the pipeline's state guards: flipping the rows means even a dispatch job
+    // claimed mid-cancel finds nothing to ring. `not_needed` with an honest
+    // message is the vocabulary the UI already renders.
+    const notDialled = await db
+      .update(calls)
+      .set({
+        disposition: 'not_needed',
+        failureMessage: 'Canceled before Dial dialled.',
+        completedAt: new Date().toISOString(),
+      })
+      .where(
+        and(
+          eq(calls.taskId, id),
+          eq(calls.disposition, 'pending'),
+          isNull(calls.providerCallId),
+        ),
+      )
+      .returning({ id: calls.id });
+
     await setState(ctx, id, 'canceled', 'You canceled this task.', {
       completedAt: new Date().toISOString(),
     });
@@ -614,6 +665,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     return {
       ok: true,
       callsAlreadyInFlight: dialled,
+      callsNotYetDialled: notDialled.length,
       note:
         dialled > 0
           ? `${dialled} ${dialled === 1 ? 'call was' : 'calls were'} already connecting and cannot be pulled back.`
@@ -732,6 +784,105 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     return { ok: true };
   });
 
+  /* ------------------------------------------------------------------ push */
+
+  /** Registers a device for task notifications. One token, one owner. */
+  app.post('/api/push/register', async (request, reply) => {
+    const user = requireUser(request, reply);
+    if (!user) return;
+    const parsed = pushRegisterRequestSchema.safeParse(request.body);
+    if (!parsed.success) return fail(reply, 400, 'invalid_request', firstIssue(parsed.error));
+
+    // A token identifies a device+app install. If it was previously registered
+    // to another account (sign-out without app delete, device resale), the new
+    // sign-in takes it over rather than both accounts racing for the phone.
+    await db.delete(pushTokens).where(eq(pushTokens.token, parsed.data.token));
+    await db.insert(pushTokens).values({
+      id: newId('ptok'),
+      userId: user.id,
+      token: parsed.data.token,
+      platform: parsed.data.platform,
+    });
+    await audit(db, user.id, null, 'push_registered', { platform: parsed.data.platform });
+    return { ok: true };
+  });
+
+  app.post('/api/push/unregister', async (request, reply) => {
+    const user = requireUser(request, reply);
+    if (!user) return;
+    const parsed = pushUnregisterRequestSchema.safeParse(request.body);
+    if (!parsed.success) return fail(reply, 400, 'invalid_request', firstIssue(parsed.error));
+    // Scoped to the caller's own rows: a token is only ever removed by its
+    // owner or overwritten by a newer registration.
+    await db
+      .delete(pushTokens)
+      .where(and(eq(pushTokens.token, parsed.data.token), eq(pushTokens.userId, user.id)));
+    return { ok: true };
+  });
+
+  /* -------------------------------------------------- contact bulk import */
+
+  /**
+   * Imports numbers from a device address book. Entries arrive raw; Dial
+   * normalizes each one (using the country of the user's recent searches as
+   * the hint for local formats), skips what it cannot dial, and renames when
+   * the number is already kept -- the same semantics as saving by hand.
+   */
+  app.post('/api/contacts/import', async (request, reply) => {
+    const user = requireUser(request, reply);
+    if (!user) return;
+    const parsed = importContactsRequestSchema.safeParse(request.body);
+    if (!parsed.success) return fail(reply, 400, 'invalid_request', firstIssue(parsed.error));
+
+    const hintCountry = await recentCountryFor(db, user.id);
+    let imported = 0;
+    let renamed = 0;
+    const skipped: Array<{ name: string; reason: 'invalid_number' | 'blocked_number' }> = [];
+
+    for (const entry of parsed.data.contacts) {
+      const normalized = normalizePhone(entry.phone, hintCountry);
+      if (!normalized || !isValidE164(normalized.e164)) {
+        skipped.push({ name: entry.name, reason: 'invalid_number' });
+        continue;
+      }
+      if (isBlockedNumber(normalized.e164)) {
+        skipped.push({ name: entry.name, reason: 'blocked_number' });
+        continue;
+      }
+
+      // Known number -> the import renames it, exactly as saving it twice by
+      // hand would. Unknown -> inserted; the conflict clause only guards a
+      // concurrent import of the same number.
+      const existing = await db
+        .select({ id: contacts.id })
+        .from(contacts)
+        .where(and(eq(contacts.userId, user.id), eq(contacts.phoneE164, normalized.e164)))
+        .limit(1);
+
+      if (existing[0]) {
+        await db
+          .update(contacts)
+          .set({ name: entry.name, updatedAt: new Date().toISOString() })
+          .where(eq(contacts.id, existing[0].id));
+        renamed += 1;
+      } else {
+        await db
+          .insert(contacts)
+          .values({
+            id: newId('contact'),
+            userId: user.id,
+            name: entry.name,
+            phoneE164: normalized.e164,
+          })
+          .onConflictDoNothing();
+        imported += 1;
+      }
+    }
+
+    await audit(db, user.id, null, 'contacts_imported', { imported, renamed, skipped: skipped.length });
+    return { imported, renamed, skipped };
+  });
+
   app.get('/api/settings', async (request, reply) => {
     const user = requireUser(request, reply);
     if (!user) return;
@@ -830,6 +981,10 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     reply.raw.write(`: connected\n\n`);
 
     let since = query.since ?? new Date(Date.now() - 60_000).toISOString();
+    // The cursor is a (created_at, id) pair. Timestamps alone lose events:
+    // several land in the same instant, and anything past LIMIT 100 sharing a
+    // timestamp with the cursor was skipped forever on every later poll.
+    let lastId = '';
     let closed = false;
 
     const poll = async () => {
@@ -846,16 +1001,19 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
           FROM task_events e
           JOIN tasks t ON t.id = e.task_id
           WHERE t.user_id = ${user.id}
-            AND e.created_at > ${since}
+            AND (e.created_at, e.id) > (${since}::timestamptz, ${lastId}::text)
             ${query.taskId ? sql`AND e.task_id = ${query.taskId}` : sql``}
-          ORDER BY e.created_at
+          ORDER BY e.created_at, e.id
           LIMIT 100
         `);
 
         for (const row of rows.rows ?? []) {
           since = row.created_at;
+          lastId = row.id;
+          // The `id:` line gives EventSource a cursor of its own, matching
+          // the durable-tail design.
           reply.raw.write(
-            `data: ${JSON.stringify({
+            `id: ${row.id}\ndata: ${JSON.stringify({
               type: 'state',
               taskId: row.task_id,
               state: row.state,

@@ -192,6 +192,42 @@ export const renameContactRequestSchema = z.object({
   name: z.string().trim().min(1).max(80),
 });
 
+/**
+ * Bulk contact import from a device address book. Entries arrive raw; the
+ * server normalizes, validates and skips what it cannot dial, so the client
+ * never has to agree with the server about what a valid number is.
+ */
+export const contactImportEntrySchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  phone: z.string().trim().min(3).max(30),
+});
+export type ContactImportEntry = z.infer<typeof contactImportEntrySchema>;
+
+export const importContactsRequestSchema = z.object({
+  contacts: z.array(contactImportEntrySchema).min(1).max(200),
+});
+
+export const importContactsResponseSchema = z.object({
+  imported: z.number().int().nonnegative(),
+  renamed: z.number().int().nonnegative(),
+  skipped: z.array(
+    z.object({ name: z.string(), reason: z.enum(['invalid_number', 'blocked_number']) }),
+  ),
+});
+export type ImportContactsResponse = z.infer<typeof importContactsResponseSchema>;
+
+/* ------------------------------------------------------------------- push */
+
+/** Registers a device for push notifications. The token is Expo's push token. */
+export const pushRegisterRequestSchema = z.object({
+  token: z.string().trim().min(10).max(500),
+  platform: z.enum(['ios', 'android']),
+});
+
+export const pushUnregisterRequestSchema = z.object({
+  token: z.string().trim().min(10).max(500),
+});
+
 /* --------------------------------------------------------------- settings */
 
 export const userSettingsSchema = z.object({
@@ -232,6 +268,7 @@ export const healthResponseSchema = z.object({
     discovery: z.string(),
     queue: z.string(),
     database: z.string(),
+    push: z.boolean().default(false),
   }),
 });
 export type HealthResponse = z.infer<typeof healthResponseSchema>;

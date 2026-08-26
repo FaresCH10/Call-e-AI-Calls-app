@@ -32,7 +32,7 @@ one said. That distinction is the product.
   WASM). Real constraints, real transactions, real `FOR UPDATE SKIP LOCKED`.
 - **Real native mobile app.** Expo / React Native, Hermes bytecode, native tabs
   and permissions. Not a WebView.
-- **134 automated tests**, covering the pipeline, the webhook boundary, the
+- **300+ automated tests**, covering the pipeline, the webhook boundary, the
   authorization gate and every failure path.
 
 ## What is not done yet
@@ -138,10 +138,11 @@ npm run db:migrate
 | `CALLE_API_KEY` | Placing real calls | Runs the fake provider; `TEST_PROVIDER=real` refuses to boot |
 | `OSM_CONTACT_EMAIL` | OpenStreetMap usage policy | Discovery works but is not a good citizen — set it |
 | `GOOGLE_PLACES_API_KEY` | Ratings, review counts, better numbers | Falls back to OpenStreetMap alone |
+| `EXPO_ACCESS_TOKEN` | Higher push-delivery rate limits | Push notifications still deliver |
 
 `LLM_API_KEY` is a Google Gemini API key from
 [aistudio.google.com/apikey](https://aistudio.google.com/apikey). The default
-model is `gemini-3.7-flash`; set `LLM_MODEL` to use another.
+model is `gemini-3.6-flash`; set `LLM_MODEL` to use another.
 
 ---
 
@@ -179,7 +180,8 @@ curl -s localhost:4000/health
   "callMode": "mock",
   "integrations": {
     "calle": false, "llm": false,
-    "discovery": "osm", "queue": "postgres", "database": "pglite"
+    "discovery": "osm", "queue": "postgres", "database": "pglite",
+    "push": false
   }
 }
 ```

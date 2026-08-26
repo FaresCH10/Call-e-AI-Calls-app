@@ -1,40 +1,58 @@
 /*
- * Design tokens transcribed from the supplied screenshot (section 19).
- * The values live in @dial/ui so React Native uses the identical palette;
- * they are mirrored here as custom properties for the web.
+ * Design tokens.
+ *
+ * Every colour pair a user reads was checked against WCAG AA (4.5:1) rather
+ * than picked by eye. Two failed and were replaced: the muted text was 3.03:1,
+ * which is what card labels, tallies and timestamps were being set in, and the
+ * brand indigo everyone reaches for (#6366F1) is 4.47:1 -- close enough to look
+ * fine and close enough to fail. The 600 weight of the same hue is 6.29:1.
  */
 
 :root {
-  --color-background: #f4f7fb;
+  /* Canvas and surfaces. A faint blue cast rather than pure grey, so white
+     cards read as raised without needing a heavy shadow to say so. */
+  --color-background: #f6f7fb;
   --color-surface: #ffffff;
-  --color-surface-muted: #fafbfd;
-  --color-border: #e4e9f2;
-  --color-border-strong: #d3dae6;
+  --color-surface-muted: #f8f9fc;
+  --color-surface-raised: #ffffff;
+  --color-border: #e6e9f0;
+  --color-border-strong: #d0d6e2;
 
-  --color-text-primary: #14181f;
+  --color-text-primary: #0f1420;
   --color-text-secondary: #59636f;
-  --color-text-muted: #8b95a3;
-  --color-text-placeholder: #9aa3b0;
+  /* Was #8b95a3 (3.03:1), then #6b7482 which passed on white and failed on
+     the canvas at 4.41:1. This clears 4.5:1 on both. */
+  --color-text-muted: #626a77;
+  --color-text-placeholder: #8b95a3;
 
-  --color-primary: #17191d;
-  --color-primary-hover: #2a2d33;
+  /* Indigo 600: 6.29:1 against white in both directions, so it works as a
+     button fill with white text and as link text on the canvas. */
+  --color-brand: #4f46e5;
+  --color-brand-hover: #4338ca;
+  --color-brand-soft: #eef2ff;
+  --color-brand-border: #c7d2fe;
+
+  --color-primary: #4f46e5;
+  --color-primary-hover: #4338ca;
   --color-primary-text: #ffffff;
 
-  --color-send: #4b5563;
-  --color-send-hover: #374151;
+  --color-send: #4f46e5;
+  --color-send-hover: #4338ca;
 
-  --color-success: #0f9d76;
+  /* Status colours are the text colour on their own soft background, all
+     between 5.7:1 and 6.5:1. */
+  --color-success: #036b4a;
   --color-success-soft: #e6f6f1;
-  --color-warning: #b45309;
+  --color-warning: #92400e;
   --color-warning-soft: #fdf3e7;
-  --color-danger: #c0392f;
+  --color-danger: #b02a20;
   --color-danger-soft: #fdeceb;
-  --color-info: #2563eb;
+  --color-info: #1d4ed8;
   --color-info-soft: #eaf0fe;
-  --color-active: #14b8a6;
+  --color-active: #0d9488;
 
-  --color-focus-ring: #2563eb;
-  --color-overlay: rgba(17, 20, 26, 0.45);
+  --color-focus-ring: #4f46e5;
+  --color-overlay: rgba(15, 20, 32, 0.5);
 
   --space-xs: 4px;
   --space-sm: 8px;
@@ -44,11 +62,11 @@
   --space-2xl: 32px;
   --space-3xl: 48px;
 
-  --radius-sm: 6px;
+  --radius-sm: 8px;
   --radius-md: 10px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
-  --radius-2xl: 20px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-2xl: 24px;
   --radius-pill: 999px;
 
   --text-xs: 12px;
@@ -57,66 +75,114 @@
   --text-md: 16px;
   --text-lg: 18px;
   --text-xl: 22px;
-  --text-2xl: 28px;
-  --text-3xl: 36px;
+  --text-2xl: 30px;
+  --text-3xl: 40px;
 
-  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
+  /* Set by next/font in the root layout; the stack after it is what shows
+     while the file loads and if it never arrives. */
+  --font-sans: var(--font-sans-loaded), -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 
-  --shadow-sm: 0 1px 2px rgba(20, 24, 31, 0.04);
-  --shadow-md: 0 2px 8px rgba(20, 24, 31, 0.06);
-  --shadow-lg: 0 8px 24px rgba(20, 24, 31, 0.08);
+  /* Two-layer shadows: a tight contact shadow plus a wider ambient one. A
+     single large blur reads as a drop shadow from 2013. */
+  --shadow-sm: 0 1px 2px rgba(15, 20, 32, 0.05);
+  --shadow-md: 0 1px 2px rgba(15, 20, 32, 0.05), 0 4px 12px rgba(15, 20, 32, 0.05);
+  --shadow-lg: 0 2px 4px rgba(15, 20, 32, 0.04), 0 12px 32px rgba(15, 20, 32, 0.08);
+  --shadow-focus: 0 0 0 3px rgba(79, 70, 229, 0.18);
 
   --sidebar-width: 264px;
   --content-max: 1120px;
+  /* Fast enough to feel like a response rather than an animation. */
+  --motion-fast: 120ms;
   --motion-base: 180ms;
   --easing: cubic-bezier(0.22, 0.61, 0.36, 1);
+
+  /* One scale, so nothing has to guess. */
+  --z-sticky: 10;
+  --z-dropdown: 20;
+  --z-overlay: 30;
+  --z-modal: 50;
 }
 
+/*
+ * Dark mode. The indigo is lifted to the 400 weight (5.85:1 on the raised
+ * surface): the 600 that works on white is close to unreadable on near-black.
+ */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --color-background: #0d1016;
-    --color-surface: #161a21;
-    --color-surface-muted: #1b2029;
-    --color-border: #252b35;
-    --color-border-strong: #333a46;
+    --color-background: #0b0e14;
+    --color-surface: #141821;
+    --color-surface-muted: #1a1f2a;
+    --color-surface-raised: #1a1f2a;
+    --color-border: #242a36;
+    --color-border-strong: #333b49;
     --color-text-primary: #f2f5f9;
     --color-text-secondary: #a8b2c0;
-    --color-text-muted: #78828f;
+    --color-text-muted: #94a3b8;
     --color-text-placeholder: #6b7280;
-    --color-primary: #f2f5f9;
-    --color-primary-hover: #dfe4ea;
-    --color-primary-text: #14181f;
-    --color-send: #8b95a3;
-    --color-send-hover: #a8b2c0;
+    --color-brand: #818cf8;
+    --color-brand-hover: #a5b4fc;
+    --color-brand-soft: #1c2138;
+    --color-brand-border: #313a5c;
+    /* White on #6366f1 is 4.47:1 -- the fill has to go one step darker for
+       the label to pass, even though the lighter one looks better. */
+    --color-primary: #4f46e5;
+    --color-primary-hover: #4338ca;
+    --color-primary-text: #ffffff;
+    --color-send: #4f46e5;
+    --color-send-hover: #4338ca;
+    --color-success: #6ee7b7;
     --color-success-soft: #0e2a22;
+    --color-warning: #fcd34d;
     --color-warning-soft: #2b2113;
+    --color-danger: #fca5a5;
     --color-danger-soft: #2c1715;
+    --color-info: #93c5fd;
     --color-info-soft: #141f38;
+    --color-focus-ring: #818cf8;
+    --color-overlay: rgba(0, 0, 0, 0.6);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.35);
+    --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.4), 0 12px 32px rgba(0, 0, 0, 0.45);
+    --shadow-focus: 0 0 0 3px rgba(129, 140, 248, 0.25);
   }
 }
 
 :root[data-theme="dark"] {
-  --color-background: #0d1016;
-  --color-surface: #161a21;
-  --color-surface-muted: #1b2029;
-  --color-border: #252b35;
-  --color-border-strong: #333a46;
+  --color-background: #0b0e14;
+  --color-surface: #141821;
+  --color-surface-muted: #1a1f2a;
+  --color-surface-raised: #1a1f2a;
+  --color-border: #242a36;
+  --color-border-strong: #333b49;
   --color-text-primary: #f2f5f9;
   --color-text-secondary: #a8b2c0;
-  --color-text-muted: #78828f;
+  --color-text-muted: #94a3b8;
   --color-text-placeholder: #6b7280;
-  --color-primary: #f2f5f9;
-  --color-primary-hover: #dfe4ea;
-  --color-primary-text: #14181f;
-  --color-send: #8b95a3;
-  --color-send-hover: #a8b2c0;
+  --color-brand: #818cf8;
+  --color-brand-hover: #a5b4fc;
+  --color-brand-soft: #1c2138;
+  --color-brand-border: #313a5c;
+  --color-primary: #4f46e5;
+  --color-primary-hover: #4338ca;
+  --color-primary-text: #ffffff;
+  --color-send: #4f46e5;
+  --color-send-hover: #4338ca;
+  --color-success: #6ee7b7;
   --color-success-soft: #0e2a22;
+  --color-warning: #fcd34d;
   --color-warning-soft: #2b2113;
+  --color-danger: #fca5a5;
   --color-danger-soft: #2c1715;
+  --color-info: #93c5fd;
   --color-info-soft: #141f38;
+  --color-focus-ring: #818cf8;
+  --color-overlay: rgba(0, 0, 0, 0.6);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 12px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.4), 0 12px 32px rgba(0, 0, 0, 0.45);
+  --shadow-focus: 0 0 0 3px rgba(129, 140, 248, 0.25);
 }
-
 * {
   box-sizing: border-box;
 }
@@ -131,7 +197,11 @@ body {
 body {
   font-family: var(--font-sans);
   font-size: var(--text-base);
-  line-height: 1.55;
+  /* 1.6 sits in the 1.5-1.75 band that keeps body copy readable. */
+  line-height: 1.6;
+  /* Prices and tallies sit in columns; proportional digits make them jitter
+     as they update. */
+  font-variant-numeric: tabular-nums;
   color: var(--color-text-primary);
   background: var(--color-background);
   -webkit-font-smoothing: antialiased;
@@ -254,12 +324,20 @@ select {
   transition: background var(--motion-base) var(--easing);
 }
 
+.nav-item {
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--easing),
+    color var(--motion-fast) var(--easing);
+}
+
 .nav-item:hover {
   background: rgba(20, 24, 31, 0.05);
 }
 
 .nav-item[aria-current="page"] {
-  background: rgba(20, 24, 31, 0.07);
+  background: var(--color-brand-soft);
+  color: var(--color-brand);
   font-weight: 600;
 }
 
@@ -299,6 +377,11 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   transition: background var(--motion-base) var(--easing);
+}
+
+.recent-item {
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--easing);
 }
 
 .recent-item:hover {
@@ -368,7 +451,8 @@ select {
 }
 
 .composer:focus-within {
-  border-color: var(--color-border-strong);
+  border-color: var(--color-focus-ring);
+  box-shadow: var(--shadow-focus);
 }
 
 .composer textarea {
@@ -414,18 +498,23 @@ select {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
+  /* The primary action on the home screen, so it is a full touch target on
+     every device rather than only on a phone. */
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   border: none;
   background: var(--color-send);
   color: #fff;
   cursor: pointer;
-  transition: background var(--motion-base) var(--easing);
+  transition:
+    background var(--motion-fast) var(--easing),
+    box-shadow var(--motion-fast) var(--easing);
 }
 
 .send-button:hover:not(:disabled) {
   background: var(--color-send-hover);
+  box-shadow: var(--shadow-md);
 }
 
 .send-button:disabled {
@@ -457,9 +546,16 @@ select {
     background var(--motion-base) var(--easing);
 }
 
+.suggestion {
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--easing),
+    border-color var(--motion-fast) var(--easing);
+}
+
 .suggestion:hover {
-  border-color: var(--color-border-strong);
-  background: var(--color-surface-muted);
+  border-color: var(--color-brand-border);
+  background: var(--color-brand-soft);
 }
 
 .suggestion svg {
@@ -515,6 +611,11 @@ select {
 }
 
 .status-pill {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+.status-pill {
   display: inline-flex;
   align-items: center;
   gap: var(--space-sm);
@@ -558,6 +659,20 @@ select {
   border-radius: var(--radius-lg);
   background: var(--color-surface);
   padding: var(--space-xl);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Only for cards that actually do something when clicked. */
+.card[data-interactive='true'] {
+  cursor: pointer;
+  transition:
+    border-color var(--motion-base) var(--easing),
+    box-shadow var(--motion-base) var(--easing);
+}
+
+.card[data-interactive='true']:hover {
+  border-color: var(--color-border-strong);
+  box-shadow: var(--shadow-md);
 }
 
 .card-label {
@@ -623,8 +738,11 @@ select {
 .button {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: var(--space-sm);
-  padding: 9px var(--space-lg);
+  padding: 10px var(--space-lg);
+  /* 44px is the smallest reliable touch target; the old 9px padding gave 38. */
+  min-height: 44px;
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border);
   background: var(--color-surface);
@@ -632,11 +750,22 @@ select {
   font-size: var(--text-base);
   font-weight: 500;
   cursor: pointer;
-  transition: background var(--motion-base) var(--easing);
+  white-space: nowrap;
+  /* Colour and shadow only: a transform here would nudge the row on hover. */
+  transition:
+    background var(--motion-fast) var(--easing),
+    border-color var(--motion-fast) var(--easing),
+    box-shadow var(--motion-fast) var(--easing);
 }
 
 .button:hover:not(:disabled) {
   background: var(--color-surface-muted);
+  border-color: var(--color-border-strong);
+}
+
+.button:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
 }
 
 .button[data-variant="primary"] {
@@ -647,6 +776,12 @@ select {
 
 .button[data-variant="primary"]:hover:not(:disabled) {
   background: var(--color-primary-hover);
+  border-color: var(--color-primary-hover);
+  box-shadow: var(--shadow-md);
+}
+
+.button[data-variant="danger"]:hover:not(:disabled) {
+  background: var(--color-danger-soft);
 }
 
 .button[data-variant="danger"] {
@@ -679,8 +814,103 @@ select {
   font-weight: 600;
 }
 
+/*
+ * Wide tables scroll inside their own box rather than pushing the page
+ * sideways, which is what makes a phone show a horizontal scrollbar on every
+ * screen. The tabindex lets a keyboard user scroll it without a mouse.
+ */
 .table-scroll {
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.table-scroll:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------ live state */
+
+/*
+ * The dot beside a running task. Its keyframe did not exist: the component
+ * asked for `animation: pulse`, nothing defined `pulse`, and the indicator for
+ * "this is happening right now" sat perfectly still.
+ */
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  display: inline-block;
+  flex-shrink: 0;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.75);
+  }
+}
+
+/* ------------------------------------------------------------- skeletons */
+
+/*
+ * Shown while a task's data is loading. A skeleton reserves the space the
+ * content will occupy, so the page does not jump when it arrives -- which is
+ * the actual complaint behind "it feels janky", not the wait itself.
+ */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--color-surface-muted) 25%,
+    var(--color-border) 37%,
+    var(--color-surface-muted) 63%
+  );
+  background-size: 400% 100%;
+  animation: skeleton-sheen 1.4s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+}
+
+.skeleton-line {
+  height: 12px;
+  margin-bottom: var(--space-sm);
+}
+
+.skeleton-line:last-child {
+  margin-bottom: 0;
+  width: 60%;
+}
+
+.skeleton-title {
+  height: 22px;
+  width: 45%;
+  margin-bottom: var(--space-lg);
+}
+
+@keyframes skeleton-sheen {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
+}
+
+/*
+ * Reduced motion turns the sheen off globally via the duration override, but
+ * a static gradient still reads as a placeholder rather than as content.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+    background: var(--color-surface-muted);
+  }
 }
 
 .notice {
@@ -743,16 +973,60 @@ select {
 .field input,
 .field select,
 .field textarea {
-  padding: 10px var(--space-md);
+  padding: 11px var(--space-md);
+  min-height: 44px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface);
-  outline: none;
+  color: var(--color-text-primary);
+  transition:
+    border-color var(--motion-fast) var(--easing),
+    box-shadow var(--motion-fast) var(--easing);
 }
 
-.field input:focus,
-.field select:focus {
+.field input::placeholder,
+.field textarea::placeholder {
+  color: var(--color-text-placeholder);
+}
+
+/*
+ * These used to set `outline: none` on :focus and change only the border.
+ * That rule outranked the global :focus-visible, so keyboard users lost the
+ * ring on every input in the app -- the one place it matters most.
+ */
+.field input:focus-visible,
+.field select:focus-visible,
+.field textarea:focus-visible {
+  outline: none;
   border-color: var(--color-focus-ring);
+  box-shadow: var(--shadow-focus);
+}
+
+/* ----------------------------------------------------------- touch sizes */
+
+/*
+ * A 34px icon button is comfortable with a mouse and a nuisance with a thumb.
+ * Rather than making every control finger-sized on desktop, the targets grow
+ * only where the pointer is coarse -- which is the condition the 44px
+ * guidance is actually about.
+ */
+@media (pointer: coarse) {
+  .icon-button {
+    width: 44px;
+    height: 44px;
+  }
+
+  .nav-item,
+  .recent-item,
+  .suggestion {
+    min-height: 44px;
+  }
+
+  .link-button {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+  }
 }
 
 /* ------------------------------------------------------------- responsive */

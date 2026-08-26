@@ -23,6 +23,9 @@ import { Card, Pill, Button, SectionLabel, Notice } from '../../components/ui';
  * locks, and adaptive polling is both simpler and more reliable there. The
  * interval backs off once the task is no longer moving.
  */
+/** How many of the businesses found are shown before "Show more" -- matches the web. */
+const CANDIDATE_PREVIEW = 5;
+
 export default function TaskScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
@@ -30,6 +33,10 @@ export default function TaskScreen() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [intake, setIntake] = useState<Record<string, string>>({});
+  const [callingCandidate, setCallingCandidate] = useState<string | null>(null);
+  const [openTranscripts, setOpenTranscripts] = useState<Set<string>>(new Set());
+  // A search can turn up ninety businesses; the web caps the list the same way.
+  const [showAllCandidates, setShowAllCandidates] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -63,6 +70,21 @@ export default function TaskScreen() {
     }
   }
 
+  async function callCandidate(candidateId: string) {
+    setCallingCandidate(candidateId);
+    await act(() => api.callCandidate(task!.id, candidateId));
+    setCallingCandidate(null);
+  }
+
+  function toggleTranscript(callId: string) {
+    setOpenTranscripts((prev) => {
+      const next = new Set(prev);
+      if (next.has(callId)) next.delete(callId);
+      else next.add(callId);
+      return next;
+    });
+  }
+
   if (!task) {
     return (
       <View style={styles.centre}>
@@ -74,6 +96,12 @@ export default function TaskScreen() {
   const tone = toneFor(task.state);
   const live = LIVE_STATES.has(task.state);
   const best = task.result?.best ?? null;
+  const calledCandidateIds = new Set(task.calls.map((c) => c.candidateId));
+  const manualCallsAllowed = task.state !== 'canceled';
+  const visibleCandidates = showAllCandidates
+    ? task.candidates
+    : task.candidates.slice(0, CANDIDATE_PREVIEW);
+  const hiddenCandidates = task.candidates.length - visibleCandidates.length;
 
   return (
     <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.md }}>
@@ -260,23 +288,142 @@ export default function TaskScreen() {
       {task.calls.length > 0 ? (
         <Card>
           <SectionLabel>Calls Dial made</SectionLabel>
-          {task.calls.map((call) => (
-            <View key={call.id} style={styles.callRow}>
-              <Text style={{ color: colors.textPrimary, fontWeight: '600' }}>
-                {call.businessName}
-              </Text>
-              <Text style={{ color: colors.textSecondary, fontSize: text.sm }}>
-                {call.phoneMasked} · {call.disposition.replace(/_/g, ' ')}
-              </Text>
-              {call.structuredResult?.['evidence_summary'] ? (
-                <Text style={{ color: colors.textSecondary, marginTop: 4 }}>
-                  {String(call.structuredResult['evidence_summary'])}
+          {task.calls.map((call) => {
+            const open = openTranscripts.has(call.id);
+            return (
+              <View key={call.id} style={styles.callRow}>
+                <View style={styles.callHeader}>
+                  <Text style={{ color: colors.textPrimary, fontWeight: '600', flex: 1 }}>
+                    {call.businessName}
+                    {call.simulated ? (
+                      <Text style={{ color: colors.textMuted, fontWeight: '400' }}> · simulated</Text>
+                    ) : null}
+                  </Text>
+                  {call.transcript.length > 0 ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityState={{ expanded: open }}
+                      hitSlop={8}
+                      onPress={() => toggleTranscript(call.id)}
+                    >
+                      <Text style={{ color: colors.primary, fontSize: text.sm }}>
+                        {open ? 'Hide transcript' : `Transcript (${call.transcript.length})`}
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+                <Text style={{ color: colors.textSecondary, fontSize: text.sm }}>
+                  {call.phoneMasked} · {call.disposition.replace(/_/g, ' ')}
                 </Text>
-              ) : call.failureMessage ? (
-                <Text style={{ color: colors.textMuted, marginTop: 4 }}>{call.failureMessage}</Text>
-              ) : null}
+                {call.summary ? (
+                  <Text style={{ color: colors.textSecondary, marginTop: 4 }}>{call.summary}</Text>
+                ) : null}
+                {call.structuredResult?.['evidence_summary'] ? (
+                  <Text style={{ color: colors.textSecondary, marginTop: 4 }}>
+                    {String(call.structuredResult['evidence_summary'])}
+                  </Text>
+                ) : !call.summary && call.failureMessage ? (
+                  <Text style={{ color: colors.textMuted, marginTop: 4 }}>{call.failureMessage}</Text>
+                ) : null}
+                {open ? (
+                  <View style={styles.transcript}>
+                    {call.transcript.map((turn, index) => (
+                      <View
+                        key={`${call.id}-${index}`}
+                        style={[
+                          styles.turn,
+                          turn.speaker === 'bot' ? styles.turnBot : null,
+                          turn.speaker === 'user' ? styles.turnUser : null,
+                        ]}
+                      >
+                        <Text style={styles.turnSpeaker}>
+                          {turn.speaker === 'bot'
+                            ? 'Dial'
+                            : turn.speaker === 'user'
+                              ? 'Them'
+                              : '—'}{' '}
+                          {formatOffset(turn.offsetSeconds)}
+                        </Text>
+                        <Text style={styles.turnText}>{turn.text}</Text>
+                      </View>
+                    ))}
+                  </View>
+                ) : null}
+              </View>
+            );
+          })}
+        </Card>
+      ) : null}
+
+      {task.candidates.length > 0 ? (
+        <Card>
+          <SectionLabel>Businesses found ({task.candidates.length})</SectionLabel>
+          {visibleCandidates.map((entry) => {
+            const c = entry.candidate;
+            const called = calledCandidateIds.has(c.id);
+            return (
+              <View key={c.id} style={styles.candidateRow}>
+                <Text
+                  style={[
+                    styles.candidateName,
+                    entry.excludedReason ? { color: colors.textMuted } : null,
+                  ]}
+                >
+                  {c.name}
+                </Text>
+                <Text style={styles.candidateMeta}>
+                  {[
+                    c.distanceMeters !== null
+                      ? `${(c.distanceMeters / 1000).toFixed(1)} km`
+                      : null,
+                    c.rating !== null
+                      ? `★ ${c.rating.toFixed(1)}${c.reviewCount ? ` (${c.reviewCount})` : ''}`
+                      : null,
+                    c.phoneE164 ? c.phoneE164.replace(/(\+?\d{3})\d+(?=\d{2})/, '$1•••••') : 'no number',
+                    entry.excludedReason ? `✕ ${entry.excludedReason}` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                </Text>
+                {entry.reasons.slice(0, 2).map((reason) => (
+                  <Text key={reason} style={styles.candidateReason}>
+                    ✓ {reason}
+                  </Text>
+                ))}
+                {manualCallsAllowed && !entry.excludedReason && c.phoneE164 ? (
+                  called ? (
+                    <Text style={styles.calledTag}>Called</Text>
+                  ) : (
+                    <View style={{ marginTop: spacing.sm, alignSelf: 'flex-start' }}>
+                      <Button
+                        label="Call this one"
+                        loading={callingCandidate === c.id && busy}
+                        onPress={() => void callCandidate(c.id)}
+                      />
+                    </View>
+                  )
+                ) : null}
+              </View>
+            );
+          })}
+
+          {/*
+            Counted rather than vague: "Show 93 more" tells the reader how much
+            is behind the button, which "Show more" does not.
+          */}
+          {hiddenCandidates > 0 ? (
+            <View style={{ marginTop: spacing.md, alignSelf: 'flex-start' }}>
+              <Button
+                label={`Show ${hiddenCandidates} more`}
+                onPress={() => setShowAllCandidates(true)}
+              />
             </View>
-          ))}
+          ) : null}
+          {showAllCandidates && task.candidates.length > CANDIDATE_PREVIEW ? (
+            <View style={{ marginTop: spacing.md, alignSelf: 'flex-start' }}>
+              <Button label="Show fewer" onPress={() => setShowAllCandidates(false)} />
+            </View>
+          ) : null}
         </Card>
       ) : null}
 
@@ -306,6 +453,13 @@ export default function TaskScreen() {
   );
 }
 
+/** 75 seconds -> "1:15", matching how a call length reads on a phone. */
+function formatOffset(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
 const styles = StyleSheet.create({
   centre: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
   instruction: { fontSize: text.xl, fontWeight: '600', color: colors.textPrimary },
@@ -328,4 +482,35 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
   },
+  candidateRow: {
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  candidateName: { color: colors.textPrimary, fontWeight: '600' },
+  candidateMeta: { color: colors.textMuted, fontSize: text.sm, marginTop: 2 },
+  candidateReason: { color: colors.textSecondary, fontSize: text.sm, marginTop: 2 },
+  calledTag: { color: colors.textMuted, marginTop: spacing.sm, fontSize: text.sm },
+  callHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  transcript: {
+    marginTop: spacing.sm,
+    padding: spacing.md,
+    borderRadius: 10,
+    backgroundColor: colors.surfaceMuted,
+    gap: spacing.sm,
+  },
+  turn: {
+    borderRadius: 10,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    alignSelf: 'flex-start',
+    maxWidth: '90%',
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  turnBot: { alignSelf: 'flex-start' },
+  turnUser: { alignSelf: 'flex-end', backgroundColor: colors.background },
+  turnSpeaker: { color: colors.textMuted, fontSize: text.xs, marginBottom: 2 },
+  turnText: { color: colors.textPrimary },
 });

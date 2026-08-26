@@ -1,5 +1,5 @@
 import { Text, View, Pressable, ActivityIndicator, StyleSheet, type ViewStyle } from 'react-native';
-import { colors, radius, spacing, text } from '../lib/theme';
+import { colors, elevation, radius, spacing, text } from '../lib/theme';
 
 export function Card({ children, style }: { children: React.ReactNode; style?: ViewStyle }) {
   return <View style={[styles.card, style]}>{children}</View>;
@@ -93,6 +93,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: radius.lg,
     padding: spacing.lg,
+    // The web gives cards a soft lift off the canvas; a flat bordered box read
+    // as a different product next to it.
+    ...elevation.card,
   },
   pill: {
     alignSelf: 'flex-start',

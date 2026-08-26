@@ -14,8 +14,10 @@ import { applyTerminalSnapshot, maybeAdvance } from './pipeline.js';
  *
  *   1. Validate the payload's structure.
  *   2. Require the CALL-E-Event-Id header to match the body id.
- *   3. Record the event id first; a replay is then a no-op by construction.
- *   4. Re-fetch the call from CALL-E with our own API key, and persist THAT.
+ *   3. Check the call is one Dial actually placed -- before writing anything,
+ *      so unauthenticated traffic cannot grow the event table.
+ *   4. Record the event id; a replay is then a no-op by construction.
+ *   5. Re-fetch the call from CALL-E with our own API key, and persist THAT.
  *
  * Step 4 is the important one: anyone can POST this endpoint, so nothing a
  * caller sends is ever written to a call record.
@@ -39,12 +41,33 @@ export async function handleCalleWebhook(
   }
   const event: CalleWebhookEvent = parsed.data;
 
-  const headerIdRaw = headers['call-e-event-id'] ?? headers['CALL-E-Event-Id'];
+  // Node lowercases every incoming header name; match case-insensitively so
+  // the check survives whatever reverse proxy sits in front.
+  const headerEntry = Object.entries(headers).find(
+    ([key]) => key.toLowerCase() === 'call-e-event-id',
+  );
+  const headerIdRaw = headerEntry?.[1];
   const headerId = Array.isArray(headerIdRaw) ? headerIdRaw[0] : headerIdRaw;
   if (!headerId || headerId !== event.id) {
     // The documented mitigation for unsigned deliveries.
     incrementCounter('webhook.rejected', { reason: 'event_id_mismatch' });
     return { status: 'rejected', reason: 'Event id header did not match the payload.' };
+  }
+
+  // Ownership before claiming. The endpoint is unauthenticated, and claiming
+  // first let anyone with a well-shaped payload grow processed_webhook_events
+  // without bound -- rows for calls Dial does not own are worth nothing, so
+  // they are refused before anything is written.
+  const owned = await ctx.db
+    .select({ id: calls.id, taskId: calls.taskId })
+    .from(calls)
+    .where(eq(calls.providerCallId, event.data.id))
+    .limit(1);
+  const call = owned[0];
+  if (!call) {
+    // A call we do not own, or one from another environment sharing the key.
+    incrementCounter('webhook.ignored', { reason: 'unknown_call' });
+    return { status: 'ignored', reason: 'No matching call.' };
   }
 
   // Claim the event id before doing any work. At-least-once delivery means
@@ -62,18 +85,6 @@ export async function handleCalleWebhook(
   if (claimed.length === 0) {
     incrementCounter('webhook.duplicate');
     return { status: 'duplicate' };
-  }
-
-  const rows = await ctx.db
-    .select()
-    .from(calls)
-    .where(eq(calls.providerCallId, event.data.id))
-    .limit(1);
-  const call = rows[0];
-  if (!call) {
-    // A call we do not own, or one from another environment sharing the key.
-    incrementCounter('webhook.ignored', { reason: 'unknown_call' });
-    return { status: 'ignored', reason: 'No matching call.' };
   }
 
   // Never trust the delivered body: ask CALL-E directly, authenticated.

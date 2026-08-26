@@ -47,6 +47,25 @@ export function TargetIcon({ size = 20, className }: IconProps) {
   );
 }
 
+/**
+ * Contacts: an address book, not another target.
+ *
+ * The nav used TargetIcon for both "Results" and "Contacts", so two unrelated
+ * destinations were marked by the same glyph -- which is worse than no icon,
+ * because it actively says the two are the same thing.
+ */
+export function ContactsIcon({ size = 20, className }: IconProps) {
+  return (
+    <svg {...base(size)} className={className}>
+      <path d="M6 3.5h11a1.5 1.5 0 0 1 1.5 1.5v14a1.5 1.5 0 0 1-1.5 1.5H6z" />
+      <path d="M6 3.5v17" />
+      <path d="M3.5 7.5H6M3.5 12H6M3.5 16.5H6" />
+      <circle cx="12.5" cy="10" r="2" />
+      <path d="M9.5 16c.4-1.6 1.6-2.5 3-2.5s2.6.9 3 2.5" />
+    </svg>
+  );
+}
+
 export function ClockIcon({ size = 20, className }: IconProps) {
   return (
     <svg {...base(size)} className={className}>

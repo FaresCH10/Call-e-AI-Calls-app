@@ -28,6 +28,8 @@ const rawSchema = z.object({
   CALLE_API_KEY: z.string().default(''),
   CALLE_BASE_URL: z.string().default('https://api.heycall-e.com'),
   CALLE_WEBHOOK_URL: z.string().default(''),
+  /** Token for the Expo push service. Optional; raises its rate limits. */
+  EXPO_ACCESS_TOKEN: z.string().default(''),
 
   LLM_API_KEY: z.string().default(''),
   LLM_MODEL: z.string().default('gemini-3.6-flash'),
@@ -74,6 +76,7 @@ export interface DialConfig {
   host: string;
   callMode: CallMode;
   calle: { apiKey: string; baseUrl: string; webhookUrl: string; configured: boolean };
+  push: { accessToken: string; configured: boolean };
   llm: {
     apiKey: string;
     model: string;
@@ -214,6 +217,10 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): DialConfig 
       baseUrl: raw.CALLE_BASE_URL,
       webhookUrl: raw.CALLE_WEBHOOK_URL,
       configured: Boolean(raw.CALLE_API_KEY),
+    },
+    push: {
+      accessToken: raw.EXPO_ACCESS_TOKEN,
+      configured: Boolean(raw.EXPO_ACCESS_TOKEN),
     },
     llm: {
       apiKey: raw.LLM_API_KEY,

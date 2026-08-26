@@ -8,6 +8,7 @@ import type {
   HealthResponse,
   CreateTaskRequest,
   Contact,
+  ImportContactsResponse,
 } from '@dial/schemas';
 
 /**
@@ -190,6 +191,36 @@ export class DialApiClient {
 
   deleteContact(id: string): Promise<{ ok: boolean }> {
     return this.request(`/api/contacts/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  /**
+   * Imports device address-book entries in one call. The server normalizes
+   * and validates each number; entries it cannot dial come back as `skipped`
+   * rather than failing the batch.
+   */
+  importContacts(
+    contacts: Array<{ name: string; phone: string }>,
+  ): Promise<ImportContactsResponse> {
+    return this.request('/api/contacts/import', {
+      method: 'POST',
+      body: JSON.stringify({ contacts }),
+    });
+  }
+
+  /* ------------------------------------------------------------------ push */
+
+  registerPushToken(token: string, platform: 'ios' | 'android'): Promise<{ ok: boolean }> {
+    return this.request('/api/push/register', {
+      method: 'POST',
+      body: JSON.stringify({ token, platform }),
+    });
+  }
+
+  unregisterPushToken(token: string): Promise<{ ok: boolean }> {
+    return this.request('/api/push/unregister', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    });
   }
 
   decideAuthorization(id: string, approved: boolean): Promise<TaskDetail> {

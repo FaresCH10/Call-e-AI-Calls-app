@@ -50,6 +50,9 @@ function toneStyle(tone: string): React.CSSProperties {
   }
 }
 
+/** How many of the businesses found are shown before "Show more". */
+const CANDIDATE_PREVIEW = 5;
+
 export function TaskView({ initial }: { initial: TaskDetail }) {
   const [task, setTask] = useState<TaskDetail>(initial);
   const [busy, setBusy] = useState(false);
@@ -58,11 +61,19 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
   const [actOn, setActOn] = useState<ComparableOutcome['candidate'] | null>(null);
   const [actInstruction, setActInstruction] = useState('');
   const called = new Set(task.calls.map((c) => c.candidateId));
+  // A search can turn up ninety businesses. Showing all of them buries the
+  // result under a wall of rows nobody scrolled down to read.
+  const [showAllCandidates, setShowAllCandidates] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [answer, setAnswer] = useState('');
   const [gone, setGone] = useState(false);
   const [intake, setIntake] = useState<Record<string, string>>({});
   const router = useRouter();
+
+  const visibleCandidates = showAllCandidates
+    ? task.candidates
+    : task.candidates.slice(0, CANDIDATE_PREVIEW);
+  const hiddenCandidates = task.candidates.length - visibleCandidates.length;
 
   const live = LIVE_STATES.has(task.state) && !gone;
 
@@ -558,6 +569,8 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
                               </p>
                             ))}
                           </div>
+
+
                         </details>
                       ) : null}
                     </td>
@@ -585,7 +598,7 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
                 </tr>
               </thead>
               <tbody>
-                {task.candidates.map((entry) => (
+                {visibleCandidates.map((entry) => (
                   <tr key={entry.candidate.id}>
                     <td>
                       {entry.candidate.name}
@@ -640,6 +653,35 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
               </tbody>
             </table>
           </div>
+
+          {/*
+            Counted rather than vague: "Show 93 more" tells the reader how much
+            is behind the button, which "Show more" does not.
+          */}
+          {hiddenCandidates > 0 ? (
+            <div className="button-row" style={{ marginTop: 16 }}>
+              <button
+                type="button"
+                className="button"
+                onClick={() => setShowAllCandidates(true)}
+              >
+                Show {hiddenCandidates} more{' '}
+                {hiddenCandidates === 1 ? 'business' : 'businesses'}
+              </button>
+            </div>
+          ) : null}
+
+          {showAllCandidates && task.candidates.length > CANDIDATE_PREVIEW ? (
+            <div className="button-row" style={{ marginTop: 16 }}>
+              <button
+                type="button"
+                className="button"
+                onClick={() => setShowAllCandidates(false)}
+              >
+                Show fewer
+              </button>
+            </div>
+          ) : null}
         </details>
       ) : null}
 
@@ -783,17 +825,7 @@ function formatTime(iso: string): string {
 }
 
 function Spinner() {
-  return (
-    <span
-      aria-hidden
-      style={{
-        width: 8,
-        height: 8,
-        borderRadius: '50%',
-        background: 'currentColor',
-        display: 'inline-block',
-        animation: 'pulse 1.4s ease-in-out infinite',
-      }}
-    />
-  );
+  // Styled in globals.css so the keyframe and the element that uses it live
+  // together -- the inline version referenced an animation nothing defined.
+  return <span className="live-dot" aria-hidden />;
 }
