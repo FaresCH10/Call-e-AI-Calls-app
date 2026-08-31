@@ -26,7 +26,9 @@ export type JobKind =
   | 'task.collect'
   | 'task.compare'
   | 'task.timeout'
-  | 'push.deliver';
+  | 'push.deliver'
+  | 'biz.dispatch_run'
+  | 'biz.poll_recipient';
 
 export interface EnqueueOptions {
   runAt?: Date;

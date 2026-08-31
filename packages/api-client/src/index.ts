@@ -9,6 +9,16 @@ import type {
   CreateTaskRequest,
   Contact,
   ImportContactsResponse,
+  BusinessDto,
+  BusinessListEntry,
+  BusinessDashboard,
+  BusinessContactDto,
+  BusinessRunDto,
+  BusinessRunSummaryDto,
+  WorkflowDto,
+  CreateBusinessRequest,
+  CreateRunRequest,
+  UsageResponse,
 } from '@dial/schemas';
 
 /**
@@ -238,6 +248,153 @@ export class DialApiClient {
     return this.request(`/api/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
+  /* ------------------------------------------------------- business mode */
+
+  listBusinesses(): Promise<{
+    businesses: BusinessListEntry[];
+    templates: Array<{ id: string; label: string; description: string }>;
+  }> {
+    return this.request('/api/businesses');
+  }
+
+  createBusiness(input: CreateBusinessRequest): Promise<BusinessDto> {
+    return this.request('/api/businesses', { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  getBusiness(id: string): Promise<BusinessDto> {
+    return this.request(`/api/businesses/${encodeURIComponent(id)}`);
+  }
+
+  updateBusiness(id: string, patch: Partial<CreateBusinessRequest> & { status?: string }): Promise<BusinessDto> {
+    return this.request(`/api/businesses/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+  }
+
+  deleteBusiness(id: string): Promise<{ ok: boolean }> {
+    return this.request(`/api/businesses/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  businessDashboard(id: string): Promise<BusinessDashboard> {
+    return this.request(`/api/businesses/${encodeURIComponent(id)}/dashboard`);
+  }
+
+  listWorkflows(businessId: string): Promise<{
+    workflows: WorkflowDto[];
+    templates: Array<{
+      id: string;
+      label: string;
+      description: string;
+      direction: string;
+      contextFields: Array<{ id: string; label: string; type: string; required: boolean; hint?: string }>;
+    }>;
+  }> {
+    return this.request(`/api/businesses/${encodeURIComponent(businessId)}/workflows`);
+  }
+
+  createWorkflow(
+    businessId: string,
+    input: {
+      name: string;
+      template: string;
+      goal?: string | null;
+      defaultLocale?: string;
+      callingHours?: { startHour?: number; endHour?: number } | null;
+      retry?: { maxAttempts?: number } | null;
+    },
+  ): Promise<WorkflowDto> {
+    return this.request(`/api/businesses/${encodeURIComponent(businessId)}/workflows`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateWorkflow(
+    businessId: string,
+    workflowId: string,
+    patch: {
+      name?: string;
+      goal?: string | null;
+      defaultLocale?: string;
+      enabled?: boolean;
+      callingHours?: { startHour?: number; endHour?: number };
+      retry?: { maxAttempts?: number };
+    },
+  ): Promise<WorkflowDto> {
+    return this.request(
+      `/api/businesses/${encodeURIComponent(businessId)}/workflows/${encodeURIComponent(workflowId)}`,
+      { method: 'PATCH', body: JSON.stringify(patch) },
+    );
+  }
+
+  deleteWorkflow(businessId: string, workflowId: string): Promise<{ ok: boolean }> {
+    return this.request(
+      `/api/businesses/${encodeURIComponent(businessId)}/workflows/${encodeURIComponent(workflowId)}`,
+      { method: 'DELETE' },
+    );
+  }
+
+  listBusinessContacts(
+    businessId: string,
+    query?: string,
+  ): Promise<{ contacts: BusinessContactDto[] }> {
+    const suffix = query ? `?q=${encodeURIComponent(query)}` : '';
+    return this.request(`/api/businesses/${encodeURIComponent(businessId)}/contacts${suffix}`);
+  }
+
+  createBusinessContact(
+    businessId: string,
+    input: { name: string; phone: string; email?: string | null; metadata?: Record<string, string> | null },
+  ): Promise<BusinessContactDto> {
+    return this.request(`/api/businesses/${encodeURIComponent(businessId)}/contacts`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  }
+
+  updateBusinessContact(
+    businessId: string,
+    contactId: string,
+    patch: { name?: string; phone?: string; email?: string | null; doNotCall?: boolean },
+  ): Promise<BusinessContactDto> {
+    return this.request(
+      `/api/businesses/${encodeURIComponent(businessId)}/contacts/${encodeURIComponent(contactId)}`,
+      { method: 'PATCH', body: JSON.stringify(patch) },
+    );
+  }
+
+  deleteBusinessContact(businessId: string, contactId: string): Promise<{ ok: boolean }> {
+    return this.request(
+      `/api/businesses/${encodeURIComponent(businessId)}/contacts/${encodeURIComponent(contactId)}`,
+      { method: 'DELETE' },
+    );
+  }
+
+  createRun(businessId: string, workflowId: string, input: CreateRunRequest): Promise<{ run: BusinessRunDto }> {
+    return this.request(
+      `/api/businesses/${encodeURIComponent(businessId)}/workflows/${encodeURIComponent(workflowId)}/runs`,
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+  }
+
+  listRuns(businessId: string): Promise<{ runs: BusinessRunSummaryDto[] }> {
+    return this.request(`/api/businesses/${encodeURIComponent(businessId)}/runs`);
+  }
+
+  getRun(businessId: string, runId: string): Promise<{ run: BusinessRunDto }> {
+    return this.request(
+      `/api/businesses/${encodeURIComponent(businessId)}/runs/${encodeURIComponent(runId)}`,
+    );
+  }
+
+  cancelRun(businessId: string, runId: string): Promise<{ ok: boolean }> {
+    return this.request(
+      `/api/businesses/${encodeURIComponent(businessId)}/runs/${encodeURIComponent(runId)}/cancel`,
+      { method: 'POST' },
+    );
+  }
+
   /* -------------------------------------------------------------- settings */
 
   getSettings(): Promise<UserSettings> {
@@ -246,6 +403,11 @@ export class DialApiClient {
 
   updateSettings(patch: Partial<UserSettings>): Promise<UserSettings> {
     return this.request('/api/settings', { method: 'PATCH', body: JSON.stringify(patch) });
+  }
+
+  /** Calls and tasks used, against the ceilings that actually bound them. */
+  getUsage(days = 14): Promise<UsageResponse> {
+    return this.request(`/api/usage?days=${encodeURIComponent(String(days))}`);
   }
 
   resolveLocation(input: { text?: string; latitude?: number; longitude?: number }): Promise<{

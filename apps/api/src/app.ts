@@ -46,6 +46,8 @@ import {
   getTaskForUser,
   getSettings,
   ensureSettings,
+  getUsage,
+  recordTaskCreated,
   handleCalleWebhook,
   setState,
   audit,
@@ -68,6 +70,7 @@ import {
   revokeSession,
 } from './auth.js';
 import { RealtimeHub } from './realtime.js';
+import { registerBusinessRoutes } from './business-routes.js';
 
 const SESSION_COOKIE = 'dial_session';
 
@@ -316,6 +319,10 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       return fail(reply, 409, 'conflict', 'That task could not be created.');
     }
 
+    // After the conflict check: a redelivered request returns the original
+    // task above and must not count a second time.
+    await recordTaskCreated(db, user.id);
+
     hub.registerTaskOwner(id, user.id);
     // Interpretation depends on a shared model service that can stay busy for
     // minutes at a time, so it gets a longer retry budget than the default.
@@ -516,6 +523,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       callLanguage: row.callLanguage,
       idempotencyKey: `act-${id}-${parsed.data.candidateId}-${Date.now()}`,
     });
+    await recordTaskCreated(db, user.id);
 
     hub.registerTaskOwner(followUpId, user.id);
     await enqueueJob(db, 'task.interpret', { taskId: followUpId }, {
@@ -890,6 +898,29 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     return getSettings(db, user.id);
   });
 
+  /*
+   * Usage, read from the very rows the call budget is enforced against, so
+   * the page cannot report one figure while the limiter applies another.
+   */
+  app.get('/api/usage', async (request, reply) => {
+    const user = requireUser(request, reply);
+    if (!user) return;
+    const { days } = request.query as { days?: string };
+    // Anything not a positive number falls back to the default rather than
+    // being clamped: `Math.max(1, -5)` would quietly answer with one day,
+    // which looks like data rather than like a rejected parameter.
+    const asked = Number(days);
+    const window = Number.isFinite(asked) && asked > 0 ? Math.min(90, Math.floor(asked)) : 14;
+    const usage = await getUsage(db, user.id, window);
+    return {
+      ...usage,
+      limits: {
+        callsPerDay: ctx.config.limits.maxCallsPerUserPerDay,
+        callsPerTask: ctx.config.limits.maxCallsPerTask,
+      },
+    };
+  });
+
   app.patch('/api/settings', async (request, reply) => {
     const user = requireUser(request, reply);
     if (!user) return;
@@ -1056,6 +1087,8 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
   app.setNotFoundHandler((request, reply) =>
     reply.code(404).send({ error: { code: 'not_found', message: 'No such endpoint.' } }),
   );
+
+  await registerBusinessRoutes(app, { db, ctx });
 
   app.setErrorHandler((rawError, request, reply) => {
     const error = rawError as { statusCode?: number; message: string };

@@ -255,6 +255,33 @@ export type UserSettings = z.infer<typeof userSettingsSchema>;
 
 export const updateSettingsRequestSchema = userSettingsSchema.partial();
 
+/**
+ * What the account has actually used, and against what ceiling.
+ *
+ * The counts come from the same `usage_counters` rows the call budget is
+ * enforced against, so the page cannot show one number while the limiter
+ * applies another.
+ */
+export const usageDaySchema = z.object({
+  /** YYYY-MM-DD, UTC. */
+  day: z.string(),
+  callsPlaced: z.number().int(),
+  tasksCreated: z.number().int(),
+});
+
+export const usageResponseSchema = z.object({
+  today: usageDaySchema,
+  history: z.array(usageDaySchema),
+  totals: z.object({ callsPlaced: z.number().int(), tasksCreated: z.number().int() }),
+  limits: z.object({
+    /** Calls this account may place in a UTC day. */
+    callsPerDay: z.number().int(),
+    /** Calls one task may place before Dial stops and reports what it has. */
+    callsPerTask: z.number().int(),
+  }),
+});
+export type UsageResponse = z.infer<typeof usageResponseSchema>;
+
 /* ----------------------------------------------------------------- system */
 
 export const healthResponseSchema = z.object({

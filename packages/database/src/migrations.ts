@@ -333,4 +333,161 @@ CREATE INDEX IF NOT EXISTS contacts_user_idx ON contacts (user_id, name);
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS purpose_asks integer NOT NULL DEFAULT 0;
 `,
   },
+  {
+    id: '0007_business_automation',
+    sql: `
+-- The second orchestration mode. A business account owns workflows that call
+-- ITS customers through the same provider and the same durable queue as
+-- consumer tasks. Separate entities throughout: this is not business_candidates
+-- (discovered businesses) and does not touch the task-shaped calls table.
+
+CREATE TABLE IF NOT EXISTS businesses (
+  id text PRIMARY KEY,
+  owner_user_id text NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  name text NOT NULL,
+  industry text NOT NULL DEFAULT 'other',
+  timezone text NOT NULL DEFAULT 'UTC',
+  country text,
+  locale text NOT NULL DEFAULT 'en',
+  address text,
+  website text,
+  business_phone text,
+  status text NOT NULL DEFAULT 'active',
+  hours jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS businesses_owner_idx ON businesses (owner_user_id);
+
+CREATE TABLE IF NOT EXISTS business_members (
+  id text PRIMARY KEY,
+  business_id text NOT NULL REFERENCES businesses (id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  role text NOT NULL DEFAULT 'owner',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS business_members_unique ON business_members (business_id, user_id);
+CREATE INDEX IF NOT EXISTS business_members_user_idx ON business_members (user_id);
+
+CREATE TABLE IF NOT EXISTS business_workflows (
+  id text PRIMARY KEY,
+  business_id text NOT NULL REFERENCES businesses (id) ON DELETE CASCADE,
+  name text NOT NULL,
+  template text NOT NULL,
+  direction text NOT NULL DEFAULT 'outbound',
+  enabled boolean NOT NULL DEFAULT true,
+  goal text,
+  default_locale text NOT NULL DEFAULT 'en',
+  calling_hours jsonb NOT NULL DEFAULT '{"startHour":9,"endHour":19}'::jsonb,
+  retry jsonb NOT NULL DEFAULT '{"maxAttempts":2}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS business_workflows_business_idx ON business_workflows (business_id);
+
+CREATE TABLE IF NOT EXISTS business_contacts (
+  id text PRIMARY KEY,
+  business_id text NOT NULL REFERENCES businesses (id) ON DELETE CASCADE,
+  external_reference text,
+  name text NOT NULL,
+  phone_e164 text NOT NULL,
+  email text,
+  locale text,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  do_not_call boolean NOT NULL DEFAULT false,
+  opted_out_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS business_contacts_business_phone
+  ON business_contacts (business_id, phone_e164);
+CREATE INDEX IF NOT EXISTS business_contacts_business_name_idx
+  ON business_contacts (business_id, name);
+
+CREATE TABLE IF NOT EXISTS business_runs (
+  id text PRIMARY KEY,
+  business_id text NOT NULL REFERENCES businesses (id) ON DELETE CASCADE,
+  workflow_id text NOT NULL REFERENCES business_workflows (id) ON DELETE CASCADE,
+  state text NOT NULL DEFAULT 'queued',
+  scheduled_at timestamptz NOT NULL,
+  started_at timestamptz,
+  completed_at timestamptz,
+  idempotency_key text NOT NULL,
+  context jsonb NOT NULL DEFAULT '{}'::jsonb,
+  stats jsonb NOT NULL DEFAULT '{}'::jsonb,
+  failure_code text,
+  failure_message text,
+  created_by_user_id text REFERENCES users (id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS business_runs_idempotency_key
+  ON business_runs (idempotency_key);
+CREATE INDEX IF NOT EXISTS business_runs_business_state_idx
+  ON business_runs (business_id, state);
+CREATE INDEX IF NOT EXISTS business_runs_scheduled_idx ON business_runs (scheduled_at);
+
+CREATE TABLE IF NOT EXISTS business_run_recipients (
+  id text PRIMARY KEY,
+  run_id text NOT NULL REFERENCES business_runs (id) ON DELETE CASCADE,
+  contact_id text REFERENCES business_contacts (id) ON DELETE SET NULL,
+  recipient_name text NOT NULL,
+  phone_e164 text NOT NULL,
+  locale text,
+  context jsonb NOT NULL DEFAULT '{}'::jsonb,
+  state text NOT NULL DEFAULT 'pending',
+  scheduled_at timestamptz NOT NULL,
+  attempt_count integer NOT NULL DEFAULT 0,
+  provider text,
+  provider_call_id text,
+  provider_status text,
+  disposition text,
+  structured_result jsonb,
+  summary text,
+  evidence jsonb NOT NULL DEFAULT '[]'::jsonb,
+  failure_code text,
+  failure_message text,
+  waiting_since timestamptz,
+  dispatched_at timestamptz,
+  started_at timestamptz,
+  completed_at timestamptz,
+  simulated boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS business_run_recipients_run_idx
+  ON business_run_recipients (run_id);
+CREATE UNIQUE INDEX IF NOT EXISTS business_run_recipients_provider_call_id
+  ON business_run_recipients (provider_call_id);
+CREATE INDEX IF NOT EXISTS business_run_recipients_state_idx
+  ON business_run_recipients (state);
+
+CREATE TABLE IF NOT EXISTS business_call_attempts (
+  id text PRIMARY KEY,
+  recipient_id text NOT NULL REFERENCES business_run_recipients (id) ON DELETE CASCADE,
+  provider_attempt_id text,
+  status text NOT NULL,
+  phone_masked text,
+  summary text,
+  transcript jsonb NOT NULL DEFAULT '[]'::jsonb,
+  failure_code text,
+  failure_message text,
+  started_at timestamptz,
+  completed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS business_call_attempts_recipient_idx
+  ON business_call_attempts (recipient_id);
+CREATE UNIQUE INDEX IF NOT EXISTS business_call_attempts_provider_key
+  ON business_call_attempts (recipient_id, provider_attempt_id);
+`,
+  },
+  {
+    id: '0008_business_custom_industry',
+    sql: `
+-- "Other" was a dead end: the industry list ended in a value that told a
+-- person nothing back. This holds what the owner actually typed. Advisory
+-- only, exactly like the industry column itself: no code branches on either.
+ALTER TABLE businesses ADD COLUMN IF NOT EXISTS custom_industry text;
+`,
+  },
 ];

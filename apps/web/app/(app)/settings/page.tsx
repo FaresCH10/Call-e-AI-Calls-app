@@ -1,10 +1,10 @@
-import { getSettings } from '@/lib/session';
-import { SettingsForm } from '@/components/settings-form';
+import { redirect } from 'next/navigation';
 
-export default async function SettingsPage() {
-  const settings = await getSettings();
-  if (!settings) {
-    return <div className="empty-state">Settings could not be loaded.</div>;
-  }
-  return <SettingsForm initial={settings} />;
+/**
+ * Settings is four pages now. This keeps old links, bookmarks and the
+ * post-sign-in path working by sending them to the first section rather than
+ * showing a fifth page that duplicates the others.
+ */
+export default function SettingsIndexPage() {
+  redirect('/settings/calling');
 }

@@ -1,4 +1,4 @@
-import { eq, and, desc, sql, lt } from 'drizzle-orm';
+import { eq, and, desc, sql, lt, inArray } from 'drizzle-orm';
 import {
   tasks,
   taskEvents,
@@ -397,6 +397,78 @@ export async function releaseCallBudget(
   `);
 }
 
+/**
+ * The user's own usage, for the Usage page.
+ *
+ * Read straight from `usage_counters`, the same rows the call budget is
+ * enforced against -- so what the page shows is what actually limited the
+ * work, not a second tally that could drift from it. Days with no activity
+ * have no row; they are filled in as zeroes rather than omitted, so a chart
+ * of the last fortnight has a bar for every day.
+ */
+export async function getUsage(
+  db: Db,
+  userId: string,
+  days: number,
+): Promise<{
+  today: { day: string; callsPlaced: number; tasksCreated: number };
+  history: Array<{ day: string; callsPlaced: number; tasksCreated: number }>;
+  totals: { callsPlaced: number; tasksCreated: number };
+}> {
+  const wanted: string[] = [];
+  const now = new Date();
+  for (let i = days - 1; i >= 0; i -= 1) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i));
+    wanted.push(d.toISOString().slice(0, 10));
+  }
+
+  const rows = await db
+    .select()
+    .from(usageCounters)
+    .where(and(eq(usageCounters.userId, userId), inArray(usageCounters.day, wanted)));
+
+  const byDay = new Map(rows.map((r) => [r.day, r]));
+  const history = wanted.map((day) => ({
+    day,
+    callsPlaced: byDay.get(day)?.callsPlaced ?? 0,
+    tasksCreated: byDay.get(day)?.tasksCreated ?? 0,
+  }));
+
+  const todayKey = today();
+  return {
+    today: history.find((h) => h.day === todayKey) ?? {
+      day: todayKey,
+      callsPlaced: 0,
+      tasksCreated: 0,
+    },
+    history,
+    totals: {
+      callsPlaced: history.reduce((sum, h) => sum + h.callsPlaced, 0),
+      tasksCreated: history.reduce((sum, h) => sum + h.tasksCreated, 0),
+    },
+  };
+}
+
+/**
+ * Records that a task was started today.
+ *
+ * `usage_counters.tasks_created` existed from the first migration and nothing
+ * ever wrote to it, so it read zero for every user forever -- fine while
+ * nothing displayed it, not fine now that the Usage page does. Counted here,
+ * next to the row the call budget already uses, so both figures come from one
+ * place.
+ */
+export async function recordTaskCreated(db: Db, userId: string): Promise<void> {
+  const day = today();
+  await db
+    .insert(usageCounters)
+    .values({ userId, day, tasksCreated: 1 })
+    .onConflictDoUpdate({
+      target: [usageCounters.userId, usageCounters.day],
+      set: { tasksCreated: sql`${usageCounters.tasksCreated} + 1` },
+    });
+}
+
 export async function countTasksToday(db: Db, userId: string): Promise<number> {
   const rows = await db
     .select()
@@ -419,7 +491,7 @@ export async function countTasksToday(db: Db, userId: string): Promise<number> {
 export async function notify(
   ctx: OrchestratorContext,
   userId: string,
-  taskId: string,
+  taskId: string | null,
   title: string,
   body: string,
 ): Promise<void> {

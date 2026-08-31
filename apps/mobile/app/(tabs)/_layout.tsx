@@ -2,7 +2,13 @@ import { Tabs, Redirect } from 'expo-router';
 import { ActivityIndicator, View } from 'react-native';
 import { useAuth } from '../../lib/auth';
 import { colors } from '../../lib/theme';
-import { PlusIcon, ClockIcon, ContactsIcon, SettingsIcon } from '../../components/icons';
+import {
+  PlusIcon,
+  ClockIcon,
+  ContactsIcon,
+  BriefcaseIcon,
+  SettingsIcon,
+} from '../../components/icons';
 
 /**
  * Native tab navigation — not a WebView, and not a re-skinned browser shell.
@@ -68,6 +74,14 @@ export default function TabsLayout() {
           title: 'Contacts',
           tabBarLabel: 'Contacts',
           tabBarIcon: ({ color, size }) => <ContactsIcon size={size} color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="business"
+        options={{
+          title: 'Business',
+          tabBarLabel: 'Business',
+          tabBarIcon: ({ color, size }) => <BriefcaseIcon size={size} color={color} />,
         }}
       />
       <Tabs.Screen

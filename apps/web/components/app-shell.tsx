@@ -7,13 +7,13 @@ import {
   BrandMark,
   PlusIcon,
   SearchIcon,
-  TargetIcon,
   ContactsIcon,
   ClockIcon,
   PhoneIcon,
   CardIcon,
   KeyIcon,
   UserIcon,
+  BriefcaseIcon,
 } from './icons';
 
 /**
@@ -64,15 +64,19 @@ export function AppShell({
         <div className="nav">
           <Link href="/history" className="nav-item" aria-current={isCurrent('/history')}>
             <SearchIcon size={20} />
-            Search tasks
-          </Link>
-          <Link href="/history" className="nav-item">
-            <TargetIcon size={20} />
-            Results
+            Your tasks
           </Link>
           <Link href="/contacts" className="nav-item" aria-current={isCurrent('/contacts')}>
             <ContactsIcon size={20} />
             Contacts
+          </Link>
+          <Link
+            href="/business"
+            className="nav-item"
+            aria-current={pathname.startsWith('/business') ? 'page' : undefined}
+          >
+            <BriefcaseIcon size={20} />
+            Business
           </Link>
         </div>
 
@@ -117,21 +121,42 @@ export function AppShell({
           )}
         </div>
 
+        {/*
+          These four pointed at /settings — four entries, one destination, and
+          no way to tell from the URL which you had followed. Each is its own
+          page now, so each can be current.
+        */}
         <div className="sidebar-footer">
           <div className="nav-divider" />
-          <Link href="/settings" className="nav-item" aria-current={isCurrent('/settings')}>
+          <Link
+            href="/settings/calling"
+            className="nav-item"
+            aria-current={isCurrent('/settings/calling')}
+          >
             <PhoneIcon size={20} />
             Calling
           </Link>
-          <Link href="/settings" className="nav-item">
+          <Link
+            href="/settings/usage"
+            className="nav-item"
+            aria-current={isCurrent('/settings/usage')}
+          >
             <CardIcon size={20} />
             Usage
           </Link>
-          <Link href="/settings" className="nav-item">
+          <Link
+            href="/settings/permissions"
+            className="nav-item"
+            aria-current={isCurrent('/settings/permissions')}
+          >
             <KeyIcon size={20} />
             Permissions
           </Link>
-          <Link href="/settings" className="nav-item">
+          <Link
+            href="/settings/account"
+            className="nav-item"
+            aria-current={isCurrent('/settings/account')}
+          >
             <UserIcon size={20} />
             {user.name}
           </Link>

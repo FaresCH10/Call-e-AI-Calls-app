@@ -1,4 +1,4 @@
-import Svg, { Path, Circle, G } from 'react-native-svg';
+import Svg, { Path, Circle, G, Rect } from 'react-native-svg';
 
 /**
  * The same line icons the web app draws, on the same 24px grid with the same
@@ -103,6 +103,56 @@ export function MapPinIcon({ size = 16, color }: IconProps) {
     <Frame size={size} color={color}>
       <Path {...stroke} d="M12 21s7-5.6 7-11a7 7 0 1 0-14 0c0 5.4 7 11 7 11Z" />
       <Circle {...stroke} cx="12" cy="10" r="2.5" />
+    </Frame>
+  );
+}
+
+/** Usage: a payment card, matching the web's Usage entry. */
+export function CardIcon({ size, color }: IconProps) {
+  return (
+    <Frame size={size} color={color}>
+      <Rect {...stroke} x="3" y="5.5" width="18" height="13" rx="2" />
+      <Path {...stroke} d="M3 10h18" />
+    </Frame>
+  );
+}
+
+/** Permissions. */
+export function KeyIcon({ size, color }: IconProps) {
+  return (
+    <Frame size={size} color={color}>
+      <Circle {...stroke} cx="8" cy="12" r="3.5" />
+      <Path {...stroke} d="M11.5 12H21M18 12v3M15 12v2.2" />
+    </Frame>
+  );
+}
+
+/** Profile. */
+export function UserIcon({ size, color }: IconProps) {
+  return (
+    <Frame size={size} color={color}>
+      <Circle {...stroke} cx="12" cy="8.5" r="3.5" />
+      <Path {...stroke} d="M5 19.5a7 7 0 0 1 14 0" />
+    </Frame>
+  );
+}
+
+/** Business. */
+export function BriefcaseIcon({ size, color }: IconProps) {
+  return (
+    <Frame size={size} color={color}>
+      <Rect {...stroke} x="3" y="7.5" width="18" height="12" rx="2" />
+      <Path {...stroke} d="M9 7.5V6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1.5" />
+    </Frame>
+  );
+}
+
+/** A scheduled run. */
+export function CalendarIcon({ size, color }: IconProps) {
+  return (
+    <Frame size={size} color={color}>
+      <Rect {...stroke} x="3.5" y="5.5" width="17" height="15" rx="2" />
+      <Path {...stroke} d="M3.5 10h17M8 3.5v4M16 3.5v4" />
     </Frame>
   );
 }

@@ -444,9 +444,212 @@ export const jobs = pgTable(
   }),
 );
 
+/* ------------------------------------------------------- business mode */
+
+/**
+ * The second orchestration mode: a business account's workflows call its own
+ * customers through the same CALL-E provider and the same durable queue as
+ * consumer tasks. Deliberately separate from `business_candidates` (which
+ * records businesses DISCOVERED for a task) and from `calls` (whose rows are
+ * task/candidate-shaped). No fake tasks are created to fit this in.
+ */
+
+export const businesses = pgTable(
+  'businesses',
+  {
+    id: text('id').primaryKey(),
+    ownerUserId: text('owner_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    /** Advisory only -- recommends templates; never branches application code. */
+    industry: text('industry').notNull().default('other'),
+    /** Free text the owner typed for "Other". Advisory, like `industry`. */
+    customIndustry: text('custom_industry'),
+    timezone: text('timezone').notNull().default('UTC'),
+    country: text('country'),
+    locale: text('locale').notNull().default('en'),
+    address: text('address'),
+    website: text('website'),
+    businessPhone: text('business_phone'),
+    status: text('status').notNull().default('active'),
+    hours: jsonb('hours'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => ({ ownerIdx: index('businesses_owner_idx').on(t.ownerUserId) }),
+);
+
+export const businessMembers = pgTable(
+  'business_members',
+  {
+    id: text('id').primaryKey(),
+    businessId: text('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    role: text('role').notNull().default('owner'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => ({
+    memberUnique: uniqueIndex('business_members_unique').on(t.businessId, t.userId),
+    userIdx: index('business_members_user_idx').on(t.userId),
+  }),
+);
+
+export const businessWorkflows = pgTable(
+  'business_workflows',
+  {
+    id: text('id').primaryKey(),
+    businessId: text('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    /** Which declarative template this runs on. Not an industry column. */
+    template: text('template').notNull(),
+    direction: text('direction').notNull().default('outbound'),
+    enabled: boolean('enabled').notNull().default(true),
+    /** The owner's extra instructions for custom jobs. Untrusted at brief time. */
+    goal: text('goal'),
+    defaultLocale: text('default_locale').notNull().default('en'),
+    callingHours: jsonb('calling_hours').notNull().default({ startHour: 9, endHour: 19 }),
+    retry: jsonb('retry').notNull().default({ maxAttempts: 2 }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => ({ businessIdx: index('business_workflows_business_idx').on(t.businessId) }),
+);
+
+export const businessContacts = pgTable(
+  'business_contacts',
+  {
+    id: text('id').primaryKey(),
+    businessId: text('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    externalReference: text('external_reference'),
+    name: text('name').notNull(),
+    phoneE164: text('phone_e164').notNull(),
+    email: text('email'),
+    locale: text('locale'),
+    metadata: jsonb('metadata').notNull().default({}),
+    doNotCall: boolean('do_not_call').notNull().default(false),
+    optedOutAt: timestamp('opted_out_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => ({
+    contactUnique: uniqueIndex('business_contacts_business_phone').on(t.businessId, t.phoneE164),
+    nameIdx: index('business_contacts_business_name_idx').on(t.businessId, t.name),
+  }),
+);
+
+export const businessRuns = pgTable(
+  'business_runs',
+  {
+    id: text('id').primaryKey(),
+    businessId: text('business_id')
+      .notNull()
+      .references(() => businesses.id, { onDelete: 'cascade' }),
+    workflowId: text('workflow_id')
+      .notNull()
+      .references(() => businessWorkflows.id, { onDelete: 'cascade' }),
+    state: text('state').notNull().default('queued'),
+    scheduledAt: timestamp('scheduled_at', { withTimezone: true, mode: 'string' }).notNull(),
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'string' }),
+    completedAt: timestamp('completed_at', { withTimezone: true, mode: 'string' }),
+    /** Deterministic; a retried create returns the original run. */
+    idempotencyKey: text('idempotency_key').notNull(),
+    context: jsonb('context').notNull().default({}),
+    stats: jsonb('stats').notNull().default({}),
+    failureCode: text('failure_code'),
+    failureMessage: text('failure_message'),
+    createdByUserId: text('created_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => ({
+    idemUnique: uniqueIndex('business_runs_idempotency_key').on(t.idempotencyKey),
+    stateIdx: index('business_runs_business_state_idx').on(t.businessId, t.state),
+    scheduledIdx: index('business_runs_scheduled_idx').on(t.scheduledAt),
+  }),
+);
+
+export const businessRunRecipients = pgTable(
+  'business_run_recipients',
+  {
+    id: text('id').primaryKey(),
+    runId: text('run_id')
+      .notNull()
+      .references(() => businessRuns.id, { onDelete: 'cascade' }),
+    /** Snapshot survives contact deletion; null when the contact row is gone. */
+    contactId: text('contact_id').references(() => businessContacts.id, { onDelete: 'set null' }),
+    recipientName: text('recipient_name').notNull(),
+    phoneE164: text('phone_e164').notNull(),
+    locale: text('locale'),
+    context: jsonb('context').notNull().default({}),
+    state: text('state').notNull().default('pending'),
+    scheduledAt: timestamp('scheduled_at', { withTimezone: true, mode: 'string' }).notNull(),
+    attemptCount: integer('attempt_count').notNull().default(0),
+    provider: text('provider'),
+    providerCallId: text('provider_call_id'),
+    providerStatus: text('provider_status'),
+    /** Dial's short verdict: the template outcome, or a failure mapping. */
+    disposition: text('disposition'),
+    structuredResult: jsonb('structured_result'),
+    summary: text('summary'),
+    evidence: jsonb('evidence').notNull().default([]),
+    failureCode: text('failure_code'),
+    failureMessage: text('failure_message'),
+    waitingSince: timestamp('waiting_since', { withTimezone: true, mode: 'string' }),
+    dispatchedAt: timestamp('dispatched_at', { withTimezone: true, mode: 'string' }),
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'string' }),
+    completedAt: timestamp('completed_at', { withTimezone: true, mode: 'string' }),
+    simulated: boolean('simulated').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => ({
+    runIdx: index('business_run_recipients_run_idx').on(t.runId),
+    providerIdx: uniqueIndex('business_run_recipients_provider_call_id').on(t.providerCallId),
+    stateIdx: index('business_run_recipients_state_idx').on(t.state),
+  }),
+);
+
+/** Per-attempt detail for business calls, mirroring `call_attempts`. */
+export const businessCallAttempts = pgTable(
+  'business_call_attempts',
+  {
+    id: text('id').primaryKey(),
+    recipientId: text('recipient_id')
+      .notNull()
+      .references(() => businessRunRecipients.id, { onDelete: 'cascade' }),
+    providerAttemptId: text('provider_attempt_id'),
+    status: text('status').notNull(),
+    phoneMasked: text('phone_masked'),
+    summary: text('summary'),
+    transcript: jsonb('transcript').notNull().default([]),
+    failureCode: text('failure_code'),
+    failureMessage: text('failure_message'),
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'string' }),
+    completedAt: timestamp('completed_at', { withTimezone: true, mode: 'string' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  },
+  (t) => ({
+    recipientIdx: index('business_call_attempts_recipient_idx').on(t.recipientId),
+    attemptUnique: uniqueIndex('business_call_attempts_provider_key').on(t.recipientId, t.providerAttemptId),
+  }),
+);
+
 export type UserRow = typeof users.$inferSelect;
 export type TaskRow = typeof tasks.$inferSelect;
 export type CandidateRow = typeof businessCandidates.$inferSelect;
 export type CallRow = typeof calls.$inferSelect;
 export type JobRow = typeof jobs.$inferSelect;
 export type AuthorizationRequestRow = typeof authorizationRequests.$inferSelect;
+export type BusinessRow = typeof businesses.$inferSelect;
+export type BusinessWorkflowRow = typeof businessWorkflows.$inferSelect;
+export type BusinessContactRow = typeof businessContacts.$inferSelect;
+export type BusinessRunRow = typeof businessRuns.$inferSelect;
+export type BusinessRunRecipientRow = typeof businessRunRecipients.$inferSelect;

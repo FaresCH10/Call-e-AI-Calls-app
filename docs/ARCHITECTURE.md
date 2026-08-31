@@ -122,3 +122,55 @@ wording. The two that matter most:
 - **A null structured result is never a "no".** It becomes `needs_review`, and
   the comparison engine excludes it from the ranking rather than treating a
   missing price as zero.
+
+---
+
+## Two orchestration modes
+
+Dial runs one engine for two kinds of caller. Both share the CALL-E provider
+abstraction, the durable Postgres queue, the webhook boundary, idempotency
+discipline and the trust-boundary rules. They differ in domain entities, not
+in infrastructure.
+
+### Consumer tasks (the original mode)
+
+```
+User instruction -> interpreter -> discovery -> ranking -> CALL-E -> comparison
+```
+
+Dial discovers businesses for a person and calls them. Entities: `tasks`,
+`business_candidates` (discovered businesses -- nothing to do with business
+accounts), `calls`.
+
+### Business workflows (the second mode)
+
+```
+Business -> workflow -> contacts -> runs -> recipients -> CALL-E -> structured outcomes
+```
+
+A business account uses CALL-E as phone automation staff: appointment
+reminders, customer callbacks, custom phone jobs. Entities: `businesses`,
+`business_members`, `business_workflows`, `business_contacts`,
+`business_runs`, `business_run_recipients`, `business_call_attempts`.
+
+The model is domain-agnostic by construction: a dental clinic and a plumbing
+company differ only in which declarative template they picked
+(`packages/schemas/src/business.ts`) and what context they attach to a run.
+No application code branches on industry.
+
+Scheduling is durable: a run becomes a `biz.dispatch_run` queue job with a
+deterministic dedupe key; the worker dispatches recipients through the same
+provider abstraction with per-recipient idempotency keys
+(`biz:<recipientId>:a<attempt>`), respects the workflow's calling hours in
+the business's timezone, never dials an opted-out contact, and retries
+no-answers under the workflow's retry policy. The webhook boundary applies
+terminal results to both modes (consumer calls first, business recipients
+second), re-fetching from CALL-E before writing anything.
+
+Outbound only, and deliberately so. An inbound "AI front desk" was modelled
+here once (`direction: 'inbound'`, a `front_desk` template shown greyed out).
+It has been removed rather than left disabled: CALL-E's API is eight
+endpoints, every one of which begins from a recipient Dial supplies, and it
+exposes no way to provision a number, bind one to an agent, or receive an
+incoming call. A product should not advertise a capability its provider does
+not have, even behind a "coming soon" label.
