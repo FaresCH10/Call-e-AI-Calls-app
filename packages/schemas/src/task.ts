@@ -144,6 +144,64 @@ export function isTerminalTaskState(state: TaskState): boolean {
   return TERMINAL_TASK_STATES.includes(state);
 }
 
+/**
+ * The states in which Dial is doing the work itself.
+ *
+ * This is what the task timer counts. Two kinds of state are deliberately
+ * outside it:
+ *
+ *  - `needs_user_input` and `awaiting_confirmation`, where Dial is waiting on
+ *    a person. Counting those would report a task as having taken three hours
+ *    because somebody answered a question after lunch.
+ *  - Terminal states, obviously, and `created`/`interpreting`, which come
+ *    before the work the timer is about starts.
+ *
+ * A task can enter and leave this set more than once: finishing, then being
+ * asked to call one more business, makes it active again. The clock resumes
+ * where it stopped rather than starting over, because the question it answers
+ * is "how long has Dial spent on this", not "how long since the last button".
+ */
+export const WORKING_TASK_STATES: readonly TaskState[] = [
+  'researching',
+  'candidates_ready',
+  'planning_calls',
+  'calling',
+  'collecting_results',
+  'comparing',
+  'executing_action',
+];
+
+export function isWorkingTaskState(state: TaskState): boolean {
+  return WORKING_TASK_STATES.includes(state);
+}
+
+/**
+ * How long Dial has worked on a task, in milliseconds.
+ *
+ * `activeMs` is what has already been banked; `activeSince` is set only while
+ * the clock is running, so a client can tick without asking the server again.
+ */
+export function elapsedWorkingMs(
+  task: { activeMs: number; activeSince: string | null },
+  now: number = Date.now(),
+): number {
+  if (!task.activeSince) return task.activeMs;
+  const started = new Date(task.activeSince).getTime();
+  if (!Number.isFinite(started)) return task.activeMs;
+  // A clock skew between server and client must not show negative time.
+  return task.activeMs + Math.max(0, now - started);
+}
+
+/** "1:07" or "12:03" or "1:04:19" -- the shape a stopwatch has. */
+export function formatDuration(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const seconds = total % 60;
+  const minutes = Math.floor(total / 60) % 60;
+  const hours = Math.floor(total / 3600);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`;
+}
+
 /** User-facing wording for each state. §36: never leak machine vocabulary into the UI. */
 export const TASK_STATE_LABELS: Record<TaskState, string> = {
   created: 'Getting started',

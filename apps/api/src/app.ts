@@ -36,6 +36,7 @@ import {
   TASK_STATE_LABELS,
   type SessionUser,
   type TaskState,
+  isTerminalTaskState,
 } from '@dial/schemas';
 import {
   toTaskSummary,
@@ -47,7 +48,11 @@ import {
   getSettings,
   ensureSettings,
   getUsage,
+  getTaskSuggestions,
   recordTaskCreated,
+  pauseTask,
+  resumeTask,
+  maybeAdvance,
   handleCalleWebhook,
   setState,
   audit,
@@ -624,6 +629,61 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     return toTaskDetail(db, rows[0]!);
   });
 
+  /*
+   * Pause and resume.
+   *
+   * Pausing stops Dial starting anything new and stops the task clock. It
+   * cannot pull back a call already in flight -- CALL-E exposes no
+   * cancellation -- so anything ringing keeps ringing and its result is still
+   * recorded when it lands. The UI wording says so rather than implying
+   * otherwise.
+   */
+  app.post('/api/tasks/:id/pause', async (request, reply) => {
+    const user = requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params as { id: string };
+    const row = await getTaskForUser(db, id, user.id);
+    if (!row) return fail(reply, 404, 'not_found', 'That task does not exist.');
+
+    if (isTerminalTaskState(row.state as TaskState)) {
+      return fail(reply, 409, 'already_finished', 'That task has already finished.');
+    }
+    if (row.pausedAt) {
+      return fail(reply, 409, 'already_paused', 'That task is already paused.');
+    }
+
+    await pauseTask(ctx, id);
+    await audit(db, user.id, id, 'task_paused', {});
+    return toTaskSummary((await getTaskForUser(db, id, user.id))!);
+  });
+
+  app.post('/api/tasks/:id/resume', async (request, reply) => {
+    const user = requireUser(request, reply);
+    if (!user) return;
+    const { id } = request.params as { id: string };
+    const row = await getTaskForUser(db, id, user.id);
+    if (!row) return fail(reply, 404, 'not_found', 'That task does not exist.');
+    if (!row.pausedAt) return fail(reply, 409, 'not_paused', 'That task is not paused.');
+
+    await resumeTask(ctx, id);
+    await audit(db, user.id, id, 'task_resumed', {});
+
+    /*
+     * Only nudge the pipeline where a wave may be sitting undispatched.
+     *
+     * maybeAdvance decides what to do next from the calls that exist. On a
+     * task that has not researched yet there are none, so it concludes the
+     * work is finished and moves the task to comparison -- finishing it
+     * without ever ringing anybody. The earlier stages re-check on their own
+     * every half minute and need no nudge.
+     */
+    if (row.state === 'calling' || row.state === 'collecting_results') {
+      await maybeAdvance(ctx, id);
+    }
+
+    return toTaskSummary((await getTaskForUser(db, id, user.id))!);
+  });
+
   app.post('/api/tasks/:id/cancel', async (request, reply) => {
     const user = requireUser(request, reply);
     if (!user) return;
@@ -919,6 +979,19 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
         callsPerTask: ctx.config.limits.maxCallsPerTask,
       },
     };
+  });
+
+  /*
+   * Suggestions built from the user's own finished tasks. Sensitive ones are
+   * excluded in the query, not here, so no caller can forget to.
+   */
+  app.get('/api/suggestions', async (request, reply) => {
+    const user = requireUser(request, reply);
+    if (!user) return;
+    const { limit } = request.query as { limit?: string };
+    const asked = Number(limit);
+    const count = Number.isFinite(asked) && asked > 0 ? Math.min(12, Math.floor(asked)) : 4;
+    return { suggestions: await getTaskSuggestions(db, user.id, count) };
   });
 
   app.patch('/api/settings', async (request, reply) => {

@@ -10,10 +10,16 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import type { TaskDetail } from '@dial/schemas';
+import {
+  callProgressLabel,
+  elapsedWorkingMs,
+  formatDuration,
+  type TaskDetail,
+} from '@dial/schemas';
 import { api, ApiError } from '../../lib/api';
 import { colors, spacing, text, toneFor, LIVE_STATES } from '../../lib/theme';
 import { Card, Pill, Button, SectionLabel, Notice } from '../../components/ui';
+import { ClockIcon } from '../../components/icons';
 
 /**
  * The task detail screen, deep-linkable as dial://task/<id> so a completion
@@ -98,6 +104,11 @@ export default function TaskScreen() {
   const best = task.result?.best ?? null;
   const calledCandidateIds = new Set(task.calls.map((c) => c.candidateId));
   const manualCallsAllowed = task.state !== 'canceled';
+  const paused = Boolean(task.pausedAt);
+  // Dispatched and still waiting: the ones pausing cannot stop.
+  const outstandingCalls = task.calls.filter(
+    (call) => call.disposition === 'pending' && call.providerCallId,
+  ).length;
   const visibleCandidates = showAllCandidates
     ? task.candidates
     : task.candidates.slice(0, CANDIDATE_PREVIEW);
@@ -105,7 +116,32 @@ export default function TaskScreen() {
 
   return (
     <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.md }}>
-      <Pill label={task.stateLabel} bg={tone.bg} fg={tone.fg} />
+      {/*
+        The state and how long it has taken share a line: both answer "where is
+        this up to", and splitting them makes the reader look twice.
+      */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md, flexWrap: 'wrap' }}>
+        <Pill
+          label={paused ? `Paused - ${task.stateLabel}` : task.stateLabel}
+          bg={paused ? colors.surfaceMuted : tone.bg}
+          fg={paused ? colors.textSecondary : tone.fg}
+        />
+        <TaskTimer activeMs={task.activeMs} activeSince={task.activeSince} />
+      </View>
+
+      {/*
+        Honest about the limit: pausing stops the next call, not one already
+        ringing. CALL-E has no cancellation, so saying "paused" alone would
+        imply everything stopped.
+      */}
+      {paused ? (
+        <Notice tone="warning">
+          Paused. Dial will not call anyone else until you resume.
+          {outstandingCalls > 0
+            ? ` ${outstandingCalls} call${outstandingCalls === 1 ? '' : 's'} already in progress cannot be pulled back - the answer will still be recorded.`
+            : ''}
+        </Notice>
+      ) : null}
       <Text style={styles.instruction}>{task.instruction}</Text>
       {task.headline ? <Text style={styles.headline}>{task.headline}</Text> : null}
 
@@ -313,7 +349,7 @@ export default function TaskScreen() {
                   ) : null}
                 </View>
                 <Text style={{ color: colors.textSecondary, fontSize: text.sm }}>
-                  {call.phoneMasked} · {call.disposition.replace(/_/g, ' ')}
+                  {call.phoneMasked} · {callProgressLabel(call.disposition, call.providerStatus)}
                 </Text>
                 {call.summary ? (
                   <Text style={{ color: colors.textSecondary, marginTop: 4 }}>{call.summary}</Text>
@@ -432,6 +468,16 @@ export default function TaskScreen() {
       <View style={{ gap: spacing.sm, marginTop: spacing.md }}>
         {live ? (
           <Button
+            label={paused ? 'Resume' : 'Pause'}
+            variant="primary"
+            loading={busy}
+            onPress={() =>
+              void act(() => (paused ? api.resumeTask(task.id) : api.pauseTask(task.id)))
+            }
+          />
+        ) : null}
+        {live ? (
+          <Button
             label="Stop this task"
             variant="danger"
             loading={busy}
@@ -514,3 +560,45 @@ const styles = StyleSheet.create({
   turnSpeaker: { color: colors.textMuted, fontSize: text.xs, marginBottom: 2 },
   turnText: { color: colors.textPrimary },
 });
+
+
+/**
+ * How long Dial has worked on this task.
+ *
+ * Not "time since created": a task can wait an hour for the user to answer,
+ * and none of that is Dial working. The server banks each period of work, so
+ * this only ticks the one still open -- and a task asked to do more resumes
+ * from the banked total rather than starting again.
+ */
+function TaskTimer({ activeMs, activeSince }: { activeMs: number; activeSince: string | null }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!activeSince) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [activeSince]);
+
+  const elapsed = elapsedWorkingMs({ activeMs, activeSince }, now);
+  // A "0:00" that never moves reads as broken; show nothing until work starts.
+  if (elapsed <= 0 && !activeSince) return null;
+
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+      <ClockIcon size={14} color={activeSince ? colors.textSecondary : colors.textMuted} />
+      <Text
+        accessibilityLabel={`${activeSince ? 'Elapsed' : 'Total'} working time`}
+        style={{
+          color: activeSince ? colors.textSecondary : colors.textMuted,
+          fontSize: text.sm,
+          fontWeight: activeSince ? '500' : '400',
+          // Fixed width so the row does not jitter as the seconds tick.
+          minWidth: 40,
+          fontVariant: ['tabular-nums'],
+        }}
+      >
+        {formatDuration(elapsed)}
+      </Text>
+    </View>
+  );
+}

@@ -21,6 +21,7 @@
     "dev:worker": "npm run dev -w @dial/worker",
     "dev:web": "npm run dev -w @dial/web",
     "dev:mobile": "npm --prefix apps/mobile run start",
+    "db:check": "npm run db:check -w @dial/api",
     "db:migrate": "npm run db:migrate -w @dial/api",
     "seed": "npm run seed -w @dial/api",
     "test": "npm run test --workspaces --if-present",

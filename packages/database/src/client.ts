@@ -51,7 +51,15 @@ export async function createDatabase(options?: {
 
   if (url) {
     const pg = await import('pg');
-    const pool = new pg.default.Pool({ connectionString: url, max: 10 });
+    const pool = new pg.default.Pool(poolSettings(url));
+
+    // A pool swallows background errors by default; an idle client dropped by
+    // the server (or by a provider suspending compute) would otherwise crash
+    // the process as an unhandled 'error' event.
+    pool.on('error', (error) => {
+      logger.warn('idle postgres client errored', { error: (error as Error).message });
+    });
+
     const db = drizzlePg(pool, { schema });
     return {
       db,
@@ -340,3 +348,59 @@ export async function runMigrations(db: Db): Promise<string[]> {
 }
 
 export { schema };
+
+
+/* ------------------------------------------------------- remote postgres */
+
+/**
+ * Pool settings for a managed Postgres over the network.
+ *
+ * The defaults are tuned for a database on the same machine, which is not
+ * where this one lives. Three things differ:
+ *
+ *  - **Cold starts.** Providers that scale to zero (Neon suspends compute
+ *    after a few minutes idle) take seconds to wake. node-postgres defaults
+ *    to no connect timeout at all, so a wake-up either works or hangs; an
+ *    explicit, generous one turns that into a bounded wait with a real error.
+ *  - **Idle connections.** A pooler or a NAT will drop a connection that has
+ *    been quiet, and the pool will hand out the dead one. Retiring them first,
+ *    and keeping the rest alive at the TCP level, avoids that.
+ *  - **Connection budget.** Free tiers cap connections, and Dial runs two
+ *    processes (API and worker), each with its own pool.
+ */
+export function poolSettings(connectionString: string): {
+  connectionString: string;
+  max: number;
+  connectionTimeoutMillis: number;
+  idleTimeoutMillis: number;
+  keepAlive: boolean;
+  ssl?: { rejectUnauthorized: boolean };
+} {
+  const settings = {
+    connectionString,
+    // Two processes at 8 stays inside a 20-connection free-tier budget with
+    // room for a migration or a psql session.
+    max: 8,
+    // Long enough for a suspended database to wake, short enough that a wrong
+    // host fails with an error rather than appearing to hang.
+    connectionTimeoutMillis: 15_000,
+    idleTimeoutMillis: 30_000,
+    keepAlive: true,
+  };
+
+  /*
+   * pg 8.23 reads `sslmode` from the URL but treats `require` as `verify-full`
+   * -- full chain validation -- and warns that this will change. Providers
+   * differ on whether their certificate chains satisfy that: Neon's are
+   * publicly trusted and do, some others are not and do not.
+   *
+   * `sslmode=no-verify` is the explicit way to say "encrypt, do not verify".
+   * It is honoured here rather than left to the driver, so the intent is
+   * visible instead of depending on which pg version is installed.
+   */
+  if (/[?&]sslmode=no-verify\b/i.test(connectionString)) {
+    return { ...settings, ssl: { rejectUnauthorized: false } };
+  }
+
+  return settings;
+}

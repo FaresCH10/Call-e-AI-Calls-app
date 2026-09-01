@@ -247,3 +247,101 @@ describe('the answer budget', () => {
     expect(detail.calls[0]?.failureCode).toBe('answer_timeout');
   });
 });
+
+describe('a provider that accepts a call and never dials it', () => {
+  /*
+   * From a real run against CALL-E. Every call ever placed on the account sat
+   * at `status: queued` with `attempts: []` -- zero dial attempts -- for
+   * fifteen minutes. CALL-E reported no failure code and no error; it simply
+   * never rang anyone.
+   *
+   * The answer budget is deliberately not spent while a call is queued (see
+   * above), which was right, but left the queue itself unbounded: the task ran
+   * until the fifteen-minute stall timeout and the user was told "couldn't
+   * connect" about businesses that had never been dialled.
+   */
+  const QUEUE_ENV = { ...ENV, CALL_QUEUE_TIMEOUT_MS: '300000' };
+
+  it('gives up on the provider, and says that is what happened', async () => {
+    h = await createHarness({
+      provider: neverLeavesQueue,
+      env: QUEUE_ENV,
+      discovery: stubDiscovery({
+        candidates: [candidate({ id: 'a', name: 'Never Dialled', phoneE164: '+35316793500' })],
+      }),
+    });
+    const { token } = await signUp(h);
+    const created = await createTask(h, token, 'Find an iPhone repair shop');
+    await h.runner.drain();
+
+    // Past the queue budget, still queued.
+    for (let i = 0; i < 3; i += 1) {
+      await agePendingCalls(h, 400);
+      await dueNow(h);
+      await h.runner.drain();
+    }
+
+    const detail = await getTaskDetail(h, token, created.id);
+    const call = detail.calls[0];
+    expect(call?.disposition).toBe('failed');
+    expect(call?.failureCode).toBe('provider_never_dialled');
+    // The business did nothing. Saying "no answer" would blame it for a call
+    // it never received.
+    expect(call?.disposition).not.toBe('no_answer');
+    expect(JSON.stringify(detail)).not.toMatch(/no answer within/i);
+  });
+
+  it('names the calling service rather than the business', async () => {
+    h = await createHarness({
+      provider: neverLeavesQueue,
+      env: QUEUE_ENV,
+      discovery: stubDiscovery({
+        candidates: [candidate({ id: 'a', name: 'Never Dialled', phoneE164: '+35316793500' })],
+      }),
+    });
+    const { token } = await signUp(h);
+    const created = await createTask(h, token, 'Find an iPhone repair shop');
+    await h.runner.drain();
+
+    for (let i = 0; i < 3; i += 1) {
+      await agePendingCalls(h, 400);
+      await dueNow(h);
+      await h.runner.drain();
+    }
+
+    const detail = await getTaskDetail(h, token, created.id);
+    expect(detail.calls[0]?.failureMessage).toMatch(/calling service/i);
+    expect(detail.calls[0]?.failureMessage).toMatch(/had not dialled/i);
+    // `failureCode` is a structured field the UI branches on; what a person
+    // reads is the message, and that must carry no identifier.
+    expect(detail.calls[0]?.failureMessage).not.toMatch(/_/);
+    expect(detail.calls[0]?.failureMessage).not.toMatch(/provider_never_dialled/);
+  });
+
+  it('waits out a slow queue before giving up on it', async () => {
+    // The regression this must not reintroduce: CALL-E queues before it dials,
+    // and a call that has been waiting less than the budget may still ring and
+    // hold a useful conversation.
+    h = await createHarness({
+      provider: neverLeavesQueue,
+      env: QUEUE_ENV,
+      discovery: stubDiscovery({
+        candidates: [candidate({ id: 'a', name: 'Slow Queue', phoneE164: '+35316793500' })],
+      }),
+    });
+    const { token } = await signUp(h);
+    const created = await createTask(h, token, 'Find an iPhone repair shop');
+    await h.runner.drain();
+
+    // Well inside the five-minute budget.
+    for (let i = 0; i < 3; i += 1) {
+      await agePendingCalls(h, 60);
+      await dueNow(h);
+      await h.runner.drain();
+    }
+
+    const detail = await getTaskDetail(h, token, created.id);
+    expect(detail.calls[0]?.disposition).toBe('pending');
+    expect(detail.calls[0]?.failureCode).toBeNull();
+  });
+});

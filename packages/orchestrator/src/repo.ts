@@ -1,4 +1,4 @@
-import { eq, and, desc, sql, lt, inArray } from 'drizzle-orm';
+import { eq, and, desc, sql, lt, inArray, isNull, isNotNull } from 'drizzle-orm';
 import {
   tasks,
   taskEvents,
@@ -17,6 +17,7 @@ import {
 } from '@dial/database';
 import {
   TASK_STATE_LABELS,
+  isWorkingTaskState,
   userPolicySchema,
   DEFAULT_USER_POLICY,
   type TaskState,
@@ -54,9 +55,40 @@ export async function setState(
   const line = message ?? TASK_STATE_LABELS[state];
   const at = new Date().toISOString();
 
+  /*
+   * The task clock, moved in the same statement as the state.
+   *
+   * Reading the row first and writing back a computed total would race two
+   * concurrent transitions into losing one of them. Postgres does the
+   * arithmetic instead, from the row's own values:
+   *
+   *   entering work   -> start the clock, unless it is already running
+   *   leaving work    -> bank what has elapsed and stop it
+   *   staying in work -> leave it alone, so it keeps running across
+   *                      researching -> calling -> comparing
+   *
+   * Coming back to work after finishing therefore resumes from the banked
+   * total rather than from zero.
+   */
+  const working = isWorkingTaskState(state);
+
   await ctx.db
     .update(tasks)
-    .set({ state, updatedAt: at, ...extra })
+    .set({
+      state,
+      updatedAt: at,
+      activeMs: working
+        ? sql`${tasks.activeMs}`
+        : sql`${tasks.activeMs} + COALESCE(
+            FLOOR(EXTRACT(EPOCH FROM (now() - ${tasks.activeSince})) * 1000)::int, 0)`,
+      // A paused task keeps its state and keeps moving through the pipeline
+      // for work already in flight, so the clock has to stay stopped even when
+      // the state changes underneath it.
+      activeSince: working
+        ? sql`CASE WHEN ${tasks.pausedAt} IS NULL THEN COALESCE(${tasks.activeSince}, now()) ELSE NULL END`
+        : sql`NULL`,
+      ...extra,
+    })
     .where(eq(tasks.id, taskId));
 
   await ctx.db.insert(taskEvents).values({
@@ -67,6 +99,77 @@ export async function setState(
   });
 
   ctx.publish(taskId, { type: 'state', taskId, state, message: line, at });
+}
+
+/**
+ * Stops Dial starting anything new on a task, and stops its clock.
+ *
+ * What this cannot do is pull back a call already in flight: CALL-E exposes no
+ * cancellation. Anything ringing keeps ringing, and its result is still
+ * recorded when it lands -- the alternative is throwing away an answer the
+ * user has already paid for. What pausing stops is the *next* call.
+ *
+ * Returns false when there was nothing to pause, so a caller can tell the
+ * difference between "done" and "already was".
+ */
+export async function pauseTask(ctx: OrchestratorContext, taskId: string): Promise<boolean> {
+  const updated = await ctx.db
+    .update(tasks)
+    .set({
+      pausedAt: sql`now()`,
+      // Bank whatever the current period has run to, then stop the clock.
+      activeMs: sql`${tasks.activeMs} + COALESCE(
+        FLOOR(EXTRACT(EPOCH FROM (now() - ${tasks.activeSince})) * 1000)::int, 0)`,
+      activeSince: sql`NULL`,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(and(eq(tasks.id, taskId), isNull(tasks.pausedAt)))
+    .returning({ id: tasks.id, state: tasks.state });
+
+  if (!updated.length) return false;
+  await addEvent(ctx, taskId, updated[0]!.state as TaskState, 'Paused');
+  return true;
+}
+
+/**
+ * Starts the task again from where it stopped.
+ *
+ * The clock only restarts if the task was mid-work when it was paused; a task
+ * paused while waiting on the user resumes into that same wait, and waiting is
+ * not work.
+ */
+export async function resumeTask(ctx: OrchestratorContext, taskId: string): Promise<boolean> {
+  const updated = await ctx.db
+    .update(tasks)
+    .set({
+      pausedAt: sql`NULL`,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(and(eq(tasks.id, taskId), isNotNull(tasks.pausedAt)))
+    .returning({ id: tasks.id, state: tasks.state });
+
+  if (!updated.length) return false;
+
+  const state = updated[0]!.state as TaskState;
+  if (isWorkingTaskState(state)) {
+    await ctx.db
+      .update(tasks)
+      .set({ activeSince: sql`now()` })
+      .where(and(eq(tasks.id, taskId), isNull(tasks.activeSince)));
+  }
+
+  await addEvent(ctx, taskId, state, 'Resumed');
+  return true;
+}
+
+/** True while the user has this task paused. */
+export async function isTaskPaused(db: Db, taskId: string): Promise<boolean> {
+  const rows = await db
+    .select({ pausedAt: tasks.pausedAt })
+    .from(tasks)
+    .where(eq(tasks.id, taskId))
+    .limit(1);
+  return Boolean(rows[0]?.pausedAt);
 }
 
 export async function addEvent(
@@ -397,6 +500,101 @@ export async function releaseCallBudget(
   `);
 }
 
+/* ---------------------------------------------------------- suggestions */
+
+/**
+ * What this user actually asks Dial to do, so the home screen can offer it
+ * again instead of the same four hardcoded examples forever.
+ *
+ * Deliberately narrow about what counts:
+ *
+ *  - Only tasks that produced a verified result. "Do this again" after a task
+ *    where nobody answered is a reminder that Dial failed you, not an offer.
+ *  - Only `sensitivity: 'normal'`. The interpreter classifies medical,
+ *    financial, legal and high-risk requests precisely because they matter,
+ *    and a prescription reminder sitting on the home screen is visible to
+ *    whoever is looking at that laptop. Repetition is not worth that.
+ *  - One row per domain, carrying the most recent instruction for it, because
+ *    five variations of "plumber" are one suggestion, not five.
+ *
+ * No model call: this is a GROUP BY over rows the pipeline already wrote.
+ */
+export interface TaskSuggestion {
+  /** The free-form business domain, e.g. 'phone_repair'. */
+  domain: string;
+  /** The most recent instruction for this domain, ready to run again. */
+  instruction: string;
+  /** How many times this user has completed a task in this domain. */
+  timesUsed: number;
+  /** When the most recent one finished. */
+  lastUsedAt: string;
+  /** Where it was, when a place was resolved. */
+  locationLabel: string | null;
+}
+
+export async function getTaskSuggestions(
+  db: Db,
+  userId: string,
+  limit: number,
+): Promise<TaskSuggestion[]> {
+  /*
+   * `DISTINCT ON (domain)` with the ORDER BY below takes the most recent row
+   * per domain, and the outer query then ranks those domains by how often the
+   * user has been back. Done in one statement so a busy account does not pull
+   * its whole history into memory to be grouped.
+   */
+  const rows = await db.execute<{
+    domain: string;
+    instruction: string;
+    times_used: string | number;
+    last_used_at: string;
+    location_label: string | null;
+  }>(sql`
+    WITH done AS (
+      SELECT
+        interpreted ->> 'domain'      AS domain,
+        instruction,
+        location_label,
+        updated_at
+      FROM tasks
+      WHERE user_id = ${userId}
+        AND state = 'completed'
+        AND interpreted IS NOT NULL
+        AND result IS NOT NULL
+        -- A task with no verified best option has nothing worth repeating.
+        AND result -> 'best' IS NOT NULL
+        AND result -> 'best' <> 'null'::jsonb
+        -- Anything the interpreter flagged as sensitive stays off the home screen.
+        AND COALESCE(interpreted ->> 'sensitivity', 'normal') = 'normal'
+        AND COALESCE(interpreted ->> 'domain', '') <> ''
+    ),
+    latest AS (
+      SELECT DISTINCT ON (domain)
+        domain, instruction, location_label, updated_at,
+        COUNT(*) OVER (PARTITION BY domain) AS times_used
+      FROM done
+      ORDER BY domain, updated_at DESC
+    )
+    SELECT
+      domain,
+      instruction,
+      times_used,
+      updated_at AS last_used_at,
+      location_label
+    FROM latest
+    ORDER BY times_used DESC, updated_at DESC
+    LIMIT ${limit}
+  `);
+
+  return (rows.rows ?? []).map((row) => ({
+    domain: row.domain,
+    instruction: row.instruction,
+    timesUsed: Number(row.times_used) || 1,
+    lastUsedAt: row.last_used_at,
+    locationLabel: row.location_label,
+  }));
+}
+
 /**
  * The user's own usage, for the Usage page.
  *
@@ -522,6 +720,9 @@ export function toTaskSummary(row: typeof tasks.$inferSelect): TaskSummary {
     state: row.state as TaskState,
     stateLabel: TASK_STATE_LABELS[row.state as TaskState] ?? row.state,
     headline: row.headline,
+    activeMs: row.activeMs,
+    activeSince: row.activeSince,
+    pausedAt: row.pausedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };

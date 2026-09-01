@@ -19,6 +19,7 @@ import type {
   CreateBusinessRequest,
   CreateRunRequest,
   UsageResponse,
+  TaskSuggestionsResponse,
 } from '@dial/schemas';
 
 /**
@@ -403,6 +404,26 @@ export class DialApiClient {
 
   updateSettings(patch: Partial<UserSettings>): Promise<UserSettings> {
     return this.request('/api/settings', { method: 'PATCH', body: JSON.stringify(patch) });
+  }
+
+  /**
+   * Stops Dial starting anything new, and stops the task clock.
+   *
+   * A call already ringing cannot be pulled back -- CALL-E exposes no
+   * cancellation -- so it finishes and its answer is still recorded.
+   */
+  pauseTask(id: string): Promise<TaskSummary> {
+    return this.request(`/api/tasks/${encodeURIComponent(id)}/pause`, { method: 'POST' });
+  }
+
+  /** Picks the task up from where it stopped, clock included. */
+  resumeTask(id: string): Promise<TaskSummary> {
+    return this.request(`/api/tasks/${encodeURIComponent(id)}/resume`, { method: 'POST' });
+  }
+
+  /** Things this user has done before, ready to run again. */
+  getSuggestions(limit = 4): Promise<TaskSuggestionsResponse> {
+    return this.request(`/api/suggestions?limit=${encodeURIComponent(String(limit))}`);
   }
 
   /** Calls and tasks used, against the ceilings that actually bound them. */

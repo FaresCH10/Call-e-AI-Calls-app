@@ -85,6 +85,15 @@ export const taskSummarySchema = z.object({
   state: z.enum(TASK_STATES),
   stateLabel: z.string(),
   headline: z.string().nullable(),
+  /**
+   * How long Dial has worked on this, banked so far. Excludes time spent
+   * waiting on the user, and survives a task being restarted.
+   */
+  activeMs: z.number().int().nonnegative().default(0),
+  /** Set only while the clock is running, so a client can tick on its own. */
+  activeSince: z.string().nullable().default(null),
+  /** Set while the user has paused the task; null means it is running. */
+  pausedAt: z.string().nullable().default(null),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -281,6 +290,29 @@ export const usageResponseSchema = z.object({
   }),
 });
 export type UsageResponse = z.infer<typeof usageResponseSchema>;
+
+/**
+ * Things this user has asked Dial to do before, offered again.
+ *
+ * Derived from their own completed tasks -- not a recommendation about what
+ * they might like. Sensitive requests are excluded server-side, so nothing
+ * here needs to be filtered again by a client.
+ */
+export const taskSuggestionSchema = z.object({
+  /** The business domain the interpreter settled on, e.g. 'phone_repair'. */
+  domain: z.string(),
+  /** The instruction to run again, in the user's own words. */
+  instruction: z.string(),
+  timesUsed: z.number().int().min(1),
+  lastUsedAt: z.string(),
+  locationLabel: z.string().nullable(),
+});
+export type TaskSuggestion = z.infer<typeof taskSuggestionSchema>;
+
+export const taskSuggestionsResponseSchema = z.object({
+  suggestions: z.array(taskSuggestionSchema),
+});
+export type TaskSuggestionsResponse = z.infer<typeof taskSuggestionsResponseSchema>;
 
 /* ----------------------------------------------------------------- system */
 

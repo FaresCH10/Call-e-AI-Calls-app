@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { proxied, ApiError } from '@/lib/api';
+import type { TaskSuggestion } from '@dial/schemas';
 import {
   PlusIcon,
   PhoneCallIcon,
@@ -11,6 +12,7 @@ import {
   CalendarIcon,
   RefreshIcon,
   MapPinIcon,
+  ClockIcon,
 } from './icons';
 
 /**
@@ -19,7 +21,11 @@ import {
  * the right, and four suggestion cards beneath.
  */
 
-const SUGGESTIONS = [
+/**
+ * Shown to an account with nothing to go on yet. Everyone saw these forever,
+ * including someone forty tasks in.
+ */
+const STARTERS = [
   { icon: MessageIcon, label: 'Find the cheapest iPhone repair near me' },
   { icon: BriefcaseIcon, label: 'Get three quotes for a plumber' },
   { icon: CalendarIcon, label: 'Book a dentist appointment this week' },
@@ -34,10 +40,28 @@ export function Composer({ defaultLocationLabel }: { defaultLocationLabel: strin
   const [locationLabel, setLocationLabel] = useState(defaultLocationLabel);
   const [coords, setCoords] = useState<{ latitude: number; longitude: number } | null>(null);
   const [locating, setLocating] = useState(false);
+  const [history, setHistory] = useState<TaskSuggestion[] | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     textareaRef.current?.focus();
+  }, []);
+
+  /*
+   * Loaded after paint rather than server-rendered: the composer is the first
+   * thing anyone types into, and it must not wait on a history query to
+   * appear. Failing quietly to the starters is the right failure here -- an
+   * error banner about suggestions would be noise above the actual input.
+   */
+  useEffect(() => {
+    let alive = true;
+    proxied
+      .getSuggestions(4)
+      .then((response) => alive && setHistory(response.suggestions))
+      .catch(() => alive && setHistory([]));
+    return () => {
+      alive = false;
+    };
   }, []);
 
   async function useMyLocation() {
@@ -80,7 +104,16 @@ export function Composer({ defaultLocationLabel }: { defaultLocationLabel: strin
         // Stable for this composition, so a double-submit cannot create two tasks.
         idempotencyKey: `web-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
       });
+      /*
+       * Both, in this order.
+       *
+       * The recents list lives in the app layout, which is a server component.
+       * Navigating to a child route does not re-render a layout, so a new task
+       * did not appear in the sidebar until the page was reloaded by hand.
+       * `refresh` re-runs the layout's own fetch against the server.
+       */
       router.push(`/tasks/${task.id}`);
+      router.refresh();
     } catch (caught) {
       const message =
         caught instanceof ApiError ? caught.message : 'Something went wrong. Please try again.';
@@ -169,22 +202,78 @@ export function Composer({ defaultLocationLabel }: { defaultLocationLabel: strin
         </div>
       ) : null}
 
-      <div className="suggestions">
-        {SUGGESTIONS.map(({ icon: Icon, label }) => (
-          <button
-            key={label}
-            type="button"
-            className="suggestion"
-            onClick={() => {
-              setInstruction(label);
-              textareaRef.current?.focus();
-            }}
-          >
-            <Icon size={20} />
-            {label}
-          </button>
-        ))}
-      </div>
+      {/*
+        Your own finished tasks, offered back. Not a guess about what you
+        might like -- one row per kind of thing you have actually asked for,
+        carrying the most recent way you worded it.
+      */}
+      {history && history.length > 0 ? (
+        <>
+          <div className="suggestions-label">You have done this before</div>
+          <div className="suggestions">
+            {history.map((suggestion) => (
+              <button
+                key={suggestion.domain}
+                type="button"
+                className="suggestion"
+                onClick={() => {
+                  setInstruction(suggestion.instruction);
+                  textareaRef.current?.focus();
+                }}
+              >
+                <ClockIcon size={20} />
+                <span className="suggestion-text">
+                  <span className="suggestion-label">{suggestion.instruction}</span>
+                  <span className="suggestion-meta">{describeUse(suggestion)}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div className="suggestions">
+          {STARTERS.map(({ icon: Icon, label }) => (
+            <button
+              key={label}
+              type="button"
+              className="suggestion"
+              onClick={() => {
+                setInstruction(label);
+                textareaRef.current?.focus();
+              }}
+            >
+              <Icon size={20} />
+              <span className="suggestion-text">
+                <span className="suggestion-label">{label}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
+}
+
+/**
+ * "Twice · last week, in Dublin 2" -- enough to recognise which of your own
+ * tasks this is, without a timestamp nobody reads.
+ */
+function describeUse(suggestion: TaskSuggestion): string {
+  const parts: string[] = [];
+  if (suggestion.timesUsed > 1) parts.push(`${suggestion.timesUsed} times`);
+  parts.push(relativeDay(suggestion.lastUsedAt));
+  if (suggestion.locationLabel) parts.push(`in ${suggestion.locationLabel}`);
+  return parts.join(' \u00B7 ');
+}
+
+function relativeDay(iso: string): string {
+  const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
+  if (!Number.isFinite(days) || days < 0) return 'recently';
+  if (days === 0) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days < 7) return `${days} days ago`;
+  if (days < 14) return 'last week';
+  if (days < 60) return `${Math.floor(days / 7)} weeks ago`;
+  if (days < 365) return `${Math.floor(days / 30)} months ago`;
+  return 'over a year ago';
 }

@@ -490,4 +490,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS business_call_attempts_provider_key
 ALTER TABLE businesses ADD COLUMN IF NOT EXISTS custom_industry text;
 `,
   },
+  {
+    id: '0009_task_working_time',
+    sql: `
+-- How long Dial has actually worked on a task, as opposed to how long ago it
+-- was created. Banked across periods of activity, so a task that finishes and
+-- is then asked to call one more business resumes rather than restarting.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS active_ms integer NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS active_since timestamptz;
+`,
+  },
+  {
+    id: '0010_task_pause',
+    sql: `
+-- Pausing a task. Deliberately not a state: the task keeps the state it was
+-- in, so resuming continues from there instead of reconstructing where it had
+-- got to. Null means running.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS paused_at timestamptz;
+`,
+  },
 ];

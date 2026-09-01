@@ -53,6 +53,7 @@ import {
   setState,
   addEvent,
   getTask,
+  isTaskPaused,
   saveCandidates,
   listCandidates,
   listCalls,
@@ -82,6 +83,22 @@ export async function handleInterpret(
   ctx: OrchestratorContext,
   payload: { taskId: string },
 ): Promise<void> {
+  /*
+   * Paused: put this step back rather than dropping it.
+   *
+   * These are the linear steps -- nothing else re-triggers them, so returning
+   * without rescheduling would leave a resumed task stuck at whichever stage
+   * it happened to be paused in. Deferring costs one cheap row every half
+   * minute and needs no special case on the way back.
+   */
+  if (await isTaskPaused(ctx.db, payload.taskId)) {
+    await enqueueJob(ctx.db, 'task.interpret', payload, {
+      runAt: new Date(Date.now() + PAUSED_RECHECK_MS),
+      dedupeKey: `interpret:${payload.taskId}:${Date.now()}`,
+    });
+    return;
+  }
+
   const task = await getTask(ctx.db, payload.taskId);
   // `interpreting` is a valid entry state as well as `created`: it means a
   // previous attempt began and did not finish, which is exactly the case a
@@ -580,6 +597,22 @@ export async function handleResearch(
   ctx: OrchestratorContext,
   payload: { taskId: string },
 ): Promise<void> {
+  /*
+   * Paused: put this step back rather than dropping it.
+   *
+   * These are the linear steps -- nothing else re-triggers them, so returning
+   * without rescheduling would leave a resumed task stuck at whichever stage
+   * it happened to be paused in. Deferring costs one cheap row every half
+   * minute and needs no special case on the way back.
+   */
+  if (await isTaskPaused(ctx.db, payload.taskId)) {
+    await enqueueJob(ctx.db, 'task.research', payload, {
+      runAt: new Date(Date.now() + PAUSED_RECHECK_MS),
+      dedupeKey: `research:${payload.taskId}:${Date.now()}`,
+    });
+    return;
+  }
+
   const task = await getTask(ctx.db, payload.taskId);
   // A canceled or finished task must not keep working its way through the
   // pipeline: jobs are already queued when the user cancels, and discovery,
@@ -893,6 +926,22 @@ export async function handlePlanCalls(
   ctx: OrchestratorContext,
   payload: { taskId: string },
 ): Promise<void> {
+  /*
+   * Paused: put this step back rather than dropping it.
+   *
+   * These are the linear steps -- nothing else re-triggers them, so returning
+   * without rescheduling would leave a resumed task stuck at whichever stage
+   * it happened to be paused in. Deferring costs one cheap row every half
+   * minute and needs no special case on the way back.
+   */
+  if (await isTaskPaused(ctx.db, payload.taskId)) {
+    await enqueueJob(ctx.db, 'task.plan_calls', payload, {
+      runAt: new Date(Date.now() + PAUSED_RECHECK_MS),
+      dedupeKey: `plan:${payload.taskId}:${Date.now()}`,
+    });
+    return;
+  }
+
   const task = await getTask(ctx.db, payload.taskId);
   // Same guard as research: a job queued before a cancellation must not plan,
   // reserve budget for, or dispatch calls on a task the user withdrew.
@@ -1064,6 +1113,13 @@ export async function handleDispatchWave(
   ctx: OrchestratorContext,
   payload: { taskId: string; wave: number },
 ): Promise<void> {
+  /*
+   * A wave job queued before the pause must not dial. Returning without
+   * rescheduling is safe: resuming re-enters the pipeline through
+   * maybeAdvance, which dispatches whatever is still outstanding.
+   */
+  if (await isTaskPaused(ctx.db, payload.taskId)) return;
+
   const task = await getTask(ctx.db, payload.taskId);
   // The last place a queued job can be stopped. Without this, a wave claimed
   // just before a cancellation rang real phones for a withdrawn task.
@@ -1282,7 +1338,14 @@ export async function handlePollCall(
   // keeps being watched — it cannot be cancelled, so its real result is still
   // worth recording.
   const task = await getTask(ctx.db, payload.taskId);
-  const abandoned = call.failureCode === 'answer_timeout';
+  /*
+   * Dial has stopped waiting on this call, but the provider has not been told
+   * to stop -- CALL-E exposes no cancel. Both kinds of giving-up keep polling,
+   * so a result that does arrive replaces the assumption rather than being
+   * dropped on the floor.
+   */
+  const abandoned =
+    call.failureCode === 'answer_timeout' || call.failureCode === 'provider_never_dialled';
   if (!task) return;
   if (
     isTerminalTaskState(task.state as TaskState) &&
@@ -1322,6 +1385,60 @@ export async function handlePollCall(
         ...(startedRinging ? { waitingSince: new Date().toISOString() } : {}),
       })
       .where(eq(calls.id, call.id));
+
+    /*
+     * The queue has its own bound.
+     *
+     * The answer budget above deliberately does not run while a call is
+     * queued -- CALL-E queues before it dials, and measuring from dispatch
+     * once wrote off businesses that had never been rung. But nothing bounded
+     * the queue either. A provider that accepts a call and never dials it left
+     * the call pending until the task stalled out fifteen minutes later, and
+     * the user was told "couldn't connect", which points at the business.
+     *
+     * The business did nothing. It was never called. That is what gets said.
+     */
+    if (stillQueued && call.dispatchedAt) {
+      const queuedMs = Date.now() - new Date(call.dispatchedAt).getTime();
+      if (queuedMs >= ctx.config.limits.queueTimeoutMs) {
+        const minutes = Math.round(ctx.config.limits.queueTimeoutMs / 60_000);
+        const abandonedQueue = await ctx.db
+          .update(calls)
+          .set({
+            disposition: 'failed',
+            failureCode: 'provider_never_dialled',
+            failureMessage: `The calling service accepted this call but had not dialled it after ${minutes} minutes.`,
+            completedAt: new Date().toISOString(),
+          })
+          .where(and(eq(calls.id, call.id), eq(calls.disposition, 'pending')))
+          .returning({ id: calls.id });
+
+        if (abandonedQueue.length > 0) {
+          incrementCounter('calls.provider_never_dialled');
+          logger.warn('provider held a call without dialling', {
+            taskId: payload.taskId,
+            callId: call.id,
+            providerCallId: call.providerCallId,
+            queuedMs,
+          });
+          await addEvent(
+            ctx,
+            payload.taskId,
+            'calling',
+            `${call.businessName}: the calling service never dialled — trying another business`,
+          );
+          await maybeAdvance(ctx, payload.taskId);
+        }
+
+        // Still worth watching: if the provider does dial eventually, the real
+        // outcome replaces this one rather than being lost.
+        await enqueueJob(ctx.db, 'task.poll_call', payload, {
+          runAt: new Date(Date.now() + ctx.config.limits.pollDelayMs),
+          dedupeKey: `poll:${call.id}:${Date.now()}`,
+        });
+        return;
+      }
+    }
 
     // How long the phone has been ringing, unanswered.
     const since = (startedRinging ? null : call.waitingSince) ?? call.dispatchedAt;
@@ -1560,6 +1677,17 @@ export function deriveDisposition(
 export async function maybeAdvance(ctx: OrchestratorContext, taskId: string): Promise<void> {
   const task = await getTask(ctx.db, taskId);
   if (!task || ['completed', 'partially_completed', 'failed', 'canceled'].includes(task.state)) return;
+
+  /*
+   * Paused: do not start anything new.
+   *
+   * This is the one gate every "ring another business" decision passes
+   * through, so guarding it here covers the next wave, the top-up call and
+   * the move to comparison alike. Calls already in flight are untouched --
+   * CALL-E cannot cancel them, and their results are still worth recording
+   * when they land. Resuming calls back into here to pick up.
+   */
+  if (task.pausedAt) return;
 
   const all = await ctx.db.select().from(calls).where(eq(calls.taskId, taskId));
 
@@ -1968,12 +2096,19 @@ export async function handleCompare(
 
 }
 
+/** How often a paused task re-checks whether it may carry on. */
+const PAUSED_RECHECK_MS = 30_000;
+
 /* --------------------------------------------------------------- timeout */
 
 export async function handleTimeout(
   ctx: OrchestratorContext,
   payload: { taskId: string },
 ): Promise<void> {
+  // A paused task is not a stalled one. Failing it for inactivity would
+  // punish the user for using the pause button.
+  if (await isTaskPaused(ctx.db, payload.taskId)) return;
+
   const task = await getTask(ctx.db, payload.taskId);
   if (!task) return;
   if (['completed', 'partially_completed', 'failed', 'canceled'].includes(task.state)) return;

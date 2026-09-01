@@ -32,6 +32,36 @@ export const CALL_DISPOSITION_LABELS: Record<CallDisposition, string> = {
   not_needed: 'Not needed',
 };
 
+/**
+ * What to show for a call that has not finished.
+ *
+ * `pending` covers two different situations and the label said the same thing
+ * about both: a call Dial has planned but not yet placed, and a call that is
+ * actually connected. Six rows all reading "In progress" while three of them
+ * had never been dialled is not a wording problem -- it claims work that is
+ * not happening.
+ *
+ * The provider status is what separates them. Null means Dial has not handed
+ * the call over at all.
+ */
+export function callProgressLabel(
+  disposition: CallDisposition,
+  providerStatus: string | null,
+): string {
+  if (disposition !== 'pending') return CALL_DISPOSITION_LABELS[disposition] ?? disposition;
+
+  // Never dispatched: planned, waiting its turn.
+  if (providerStatus === null) return 'Waiting its turn';
+
+  // Accepted by the calling service, which has not dialled yet. Said plainly,
+  // because a long wait here is the service's doing and not the business's.
+  if (providerStatus === 'queued') return 'Waiting to be dialled';
+
+  if (providerStatus === 'in_progress') return 'On the call';
+
+  return CALL_DISPOSITION_LABELS.pending;
+}
+
 /** One call Dial placed, with everything needed to justify the outcome. */
 export const callRecordSchema = z.object({
   id: z.string(),

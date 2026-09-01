@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import {
   View,
   Text,
@@ -9,12 +9,13 @@ import {
   Platform,
   StyleSheet,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import * as Location from 'expo-location';
 import { api, ApiError } from '../../lib/api';
+import type { TaskSuggestion } from '@dial/schemas';
 import { colors, elevation, radius, spacing, text } from '../../lib/theme';
 import { Button, Notice } from '../../components/ui';
-import { MapPinIcon } from '../../components/icons';
+import { MapPinIcon, ClockIcon } from '../../components/icons';
 
 /**
  * The mobile command screen. Same promise as the web composer, laid out for a
@@ -22,7 +23,8 @@ import { MapPinIcon } from '../../components/icons';
  * only at the moment it is actually needed.
  */
 
-const SUGGESTIONS = [
+/** Shown to an account with no finished tasks to offer back yet. */
+const STARTERS = [
   'Find the cheapest iPhone repair near me',
   'Get three quotes for a plumber',
   'Book a dentist appointment this week',
@@ -36,6 +38,25 @@ export default function HomeScreen() {
   const [error, setError] = useState<string | null>(null);
   const [coords, setCoords] = useState<{ latitude: number; longitude: number } | null>(null);
   const [locationLabel, setLocationLabel] = useState<string | null>(null);
+  const [history, setHistory] = useState<TaskSuggestion[] | null>(null);
+
+  /*
+   * Refetched on focus, not just on mount: finishing a task and coming back
+   * to this tab should show it. Failing quietly to the starters is right --
+   * an error about suggestions would be noise above the actual composer.
+   */
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      api
+        .getSuggestions(4)
+        .then((response) => alive && setHistory(response.suggestions))
+        .catch(() => alive && setHistory([]));
+      return () => {
+        alive = false;
+      };
+    }, []),
+  );
 
   async function useMyLocation() {
     setError(null);
@@ -140,17 +161,52 @@ export default function HomeScreen() {
 
         {error ? <Notice tone="danger">{error}</Notice> : null}
 
-        <Text style={styles.suggestionsLabel}>Try</Text>
-        {SUGGESTIONS.map((suggestion) => (
-          <Pressable
-            key={suggestion}
-            onPress={() => setInstruction(suggestion)}
-            accessibilityRole="button"
-            style={({ pressed }) => [styles.suggestion, pressed && { opacity: 0.7 }]}
-          >
-            <Text style={{ color: colors.textSecondary, fontSize: text.base }}>{suggestion}</Text>
-          </Pressable>
-        ))}
+        {/*
+          Your own finished tasks, offered back -- not a guess about what you
+          might want. One row per kind of thing you have actually asked for.
+        */}
+        {history && history.length > 0 ? (
+          <>
+            <Text style={styles.suggestionsLabel}>You have done this before</Text>
+            {history.map((suggestion) => (
+              <Pressable
+                key={suggestion.domain}
+                onPress={() => setInstruction(suggestion.instruction)}
+                accessibilityRole="button"
+                accessibilityLabel={`Run again: ${suggestion.instruction}`}
+                style={({ pressed }) => [styles.suggestion, pressed && { opacity: 0.7 }]}
+              >
+                <View style={styles.suggestionRow}>
+                  <ClockIcon size={18} color={colors.textMuted} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: colors.textPrimary, fontSize: text.base }}>
+                      {suggestion.instruction}
+                    </Text>
+                    <Text style={{ color: colors.textMuted, fontSize: text.sm, marginTop: 2 }}>
+                      {describeUse(suggestion)}
+                    </Text>
+                  </View>
+                </View>
+              </Pressable>
+            ))}
+          </>
+        ) : (
+          <>
+            <Text style={styles.suggestionsLabel}>Try</Text>
+            {STARTERS.map((suggestion) => (
+              <Pressable
+                key={suggestion}
+                onPress={() => setInstruction(suggestion)}
+                accessibilityRole="button"
+                style={({ pressed }) => [styles.suggestion, pressed && { opacity: 0.7 }]}
+              >
+                <Text style={{ color: colors.textSecondary, fontSize: text.base }}>
+                  {suggestion}
+                </Text>
+              </Pressable>
+            ))}
+          </>
+        )}
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -207,6 +263,11 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     marginTop: spacing.lg,
   },
+  suggestionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
   suggestion: {
     backgroundColor: colors.surface,
     borderColor: colors.border,
@@ -217,3 +278,27 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
 });
+
+/**
+ * "3 times \u00B7 last week \u00B7 in Dublin 2" -- enough to recognise which of
+ * your own tasks this is, without a timestamp nobody reads.
+ */
+function describeUse(suggestion: TaskSuggestion): string {
+  const parts: string[] = [];
+  if (suggestion.timesUsed > 1) parts.push(`${suggestion.timesUsed} times`);
+  parts.push(relativeDay(suggestion.lastUsedAt));
+  if (suggestion.locationLabel) parts.push(`in ${suggestion.locationLabel}`);
+  return parts.join(' \u00B7 ');
+}
+
+function relativeDay(iso: string): string {
+  const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
+  if (!Number.isFinite(days) || days < 0) return 'recently';
+  if (days === 0) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days < 7) return `${days} days ago`;
+  if (days < 14) return 'last week';
+  if (days < 60) return `${Math.floor(days / 7)} weeks ago`;
+  if (days < 365) return `${Math.floor(days / 30)} months ago`;
+  return 'over a year ago';
+}

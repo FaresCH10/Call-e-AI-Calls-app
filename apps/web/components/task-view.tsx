@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import type { TaskDetail, ComparableOutcome } from '@dial/schemas';
+import { callProgressLabel, type TaskDetail, type ComparableOutcome } from '@dial/schemas';
+import { TaskTimer } from './task-timer';
 import { proxied, ApiError } from '@/lib/api';
 import { CheckIcon, PhoneIcon, MapPinIcon } from './icons';
 
@@ -103,6 +104,20 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
     };
   }, [live, task.id, refresh]);
 
+  /*
+   * When this task settles, refresh the layout once.
+   *
+   * The sidebar draws a live dot from the state the layout was rendered with,
+   * so a task finishing under the reader's eyes left the sidebar still
+   * claiming it was running. Keyed on the live-to-finished edge, so it fires
+   * once rather than on every SSE tick.
+   */
+  const wasLive = useRef(live);
+  useEffect(() => {
+    if (wasLive.current && !live && !gone) router.refresh();
+    wasLive.current = live;
+  }, [live, gone, router]);
+
   async function act(fn: () => Promise<unknown>, options: { refreshAfter?: boolean } = {}) {
     setBusy(true);
     setError(null);
@@ -119,15 +134,32 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
   }
 
   const result = task.result;
+  const paused = Boolean(task.pausedAt);
+  // Dispatched and still waiting: the ones pausing cannot stop.
+  const outstandingCalls = task.calls.filter(
+    (call) => call.disposition === 'pending' && call.providerCallId,
+  ).length;
   const tone = TONES[task.state] ?? (live ? 'active' : 'neutral');
 
   return (
     <div className="task-body">
       <header className="page-header" style={{ margin: 0 }}>
-        <span className="status-pill" style={toneStyle(tone)}>
-          {live ? <Spinner /> : null}
-          {task.stateLabel}
-        </span>
+        {/*
+          The state and how long it has taken, on one line: both answer "where
+          is this up to", and separating them makes the reader look twice.
+        */}
+        <div className="task-status-row">
+          <span className="status-pill" style={toneStyle(paused ? 'neutral' : tone)}>
+            {/* No spinner while paused: nothing is turning. */}
+            {live && !paused ? <Spinner /> : null}
+            {paused ? `Paused — ${task.stateLabel}` : task.stateLabel}
+          </span>
+          <TaskTimer
+            activeMs={task.activeMs}
+            activeSince={task.activeSince}
+            running={Boolean(task.activeSince)}
+          />
+        </div>
         <h1 className="page-title" style={{ marginTop: 12 }}>
           {task.instruction}
         </h1>
@@ -139,6 +171,20 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
       {gone ? (
         <div className="notice" data-tone="warning" role="status">
           This task has been deleted. Nothing further will happen on it.
+        </div>
+      ) : null}
+
+      {/*
+        Honest about the limit. Pausing stops the next call; it cannot pull
+        back one already ringing, because CALL-E has no cancellation. Saying
+        "paused" alone would imply everything stopped.
+      */}
+      {paused ? (
+        <div className="notice" data-tone="warning" role="status">
+          Paused. Dial will not call anyone else until you resume.
+          {outstandingCalls > 0
+            ? ` ${outstandingCalls} call${outstandingCalls === 1 ? '' : 's'} already in progress cannot be pulled back — the answer will still be recorded.`
+            : ''}
         </div>
       ) : null}
 
@@ -318,6 +364,9 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
                     actInstruction.trim(),
                   )) as { id: string };
                   router.push(`/tasks/${started.id}`);
+                  // Same reason as the composer: the sidebar is rendered by
+                  // the layout, which a push does not re-run.
+                  router.refresh();
                   return started;
                 }, { refreshAfter: false })
               }
@@ -552,7 +601,7 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
                         </span>
                       ) : null}
                     </td>
-                    <td>{dispositionLabel(call.disposition)}</td>
+                    <td>{callProgressLabel(call.disposition, call.providerStatus)}</td>
                     <td style={{ color: 'var(--color-text-secondary)' }}>
                       {(call.structuredResult?.['evidence_summary'] as string) ??
                         call.failureMessage ??
@@ -695,6 +744,20 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
         {live ? (
           <button
             className="button"
+            data-variant="primary"
+            disabled={busy}
+            onClick={() =>
+              void act(() =>
+                paused ? proxied.resumeTask(task.id) : proxied.pauseTask(task.id),
+              )
+            }
+          >
+            {paused ? 'Resume' : 'Pause'}
+          </button>
+        ) : null}
+        {live ? (
+          <button
+            className="button"
             data-variant="danger"
             disabled={busy}
             onClick={() => void act(() => proxied.cancelTask(task.id))}
@@ -799,21 +862,6 @@ function BestResult({
       </div>
     </section>
   );
-}
-
-function dispositionLabel(disposition: string): string {
-  const labels: Record<string, string> = {
-    pending: 'In progress',
-    answered_useful: 'Answered',
-    answered_no_answer_to_question: "Answered, couldn't say",
-    refused: 'Declined to answer',
-    no_answer: 'No answer',
-    voicemail: 'Voicemail',
-    failed: "Couldn't connect",
-    needs_review: 'Answer unclear',
-    not_needed: 'Not needed',
-  };
-  return labels[disposition] ?? disposition;
 }
 
 function formatTime(iso: string): string {

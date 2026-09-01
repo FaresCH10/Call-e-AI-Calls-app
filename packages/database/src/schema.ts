@@ -159,6 +159,20 @@ export const tasks = pgTable(
     headline: text('headline'),
     /** Question shown when state is needs_user_input. */
     clarificationQuestion: text('clarification_question'),
+    /**
+     * How long Dial has worked on this task, in milliseconds, banked across
+     * every period of activity. A task that finishes and is then asked to call
+     * one more business resumes from here rather than from zero.
+     */
+    activeMs: integer('active_ms').notNull().default(0),
+    /** When the current period of work began; null whenever the clock is stopped. */
+    activeSince: timestamp('active_since', { withTimezone: true, mode: 'string' }),
+    /**
+     * Set while the user has paused the task. Paused is not a state: the task
+     * keeps the state it was in, so resuming continues from there rather than
+     * having to reconstruct where it had got to.
+     */
+    pausedAt: timestamp('paused_at', { withTimezone: true, mode: 'string' }),
     /** Intake questions Dial asks before starting. */
     clarifyingQuestions: jsonb('clarifying_questions').notNull().default([]),
     /** Answers, keyed by question id. */

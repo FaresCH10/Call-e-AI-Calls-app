@@ -61,6 +61,20 @@ const rawSchema = z.object({
   CALL_WAVE_SIZE: int(1),
   CALL_POLL_DELAY_MS: int(20000),
   CALL_ANSWER_TIMEOUT_MS: int(30000),
+  /*
+   * How long the provider may sit on a call before dialling it.
+   *
+   * The answer budget deliberately does not run while a call is queued: CALL-E
+   * queues before it dials, and measuring from dispatch once made Dial write
+   * off five businesses for "no answer" that had never been rung. But nothing
+   * bounded the queue either, so a provider that accepts a call and never
+   * dials leaves it pending until the whole task stalls out fifteen minutes
+   * later, with nothing said about why.
+   *
+   * Five minutes is many times a normal queue wait and still fails fast enough
+   * to try someone else.
+   */
+  CALL_QUEUE_TIMEOUT_MS: int(5 * 60_000),
   CALL_MAX_ATTEMPTS_PER_BUSINESS: int(2),
 
   PUBLIC_WEB_URL: z.string().default('http://localhost:3000'),
@@ -156,6 +170,8 @@ export interface DialConfig {
      * connecting.
      */
     answerTimeoutMs: number;
+    /** How long the provider may hold a call before dialling it. */
+    queueTimeoutMs: number;
     /** Attempts at one business before moving on to a different one. */
     maxAttemptsPerBusiness: number;
   };
@@ -250,6 +266,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): DialConfig 
       callWaveSize: raw.CALL_WAVE_SIZE,
       pollDelayMs: raw.CALL_POLL_DELAY_MS,
       answerTimeoutMs: raw.CALL_ANSWER_TIMEOUT_MS,
+      queueTimeoutMs: raw.CALL_QUEUE_TIMEOUT_MS,
       maxAttemptsPerBusiness: raw.CALL_MAX_ATTEMPTS_PER_BUSINESS,
     },
     publicWebUrl: raw.PUBLIC_WEB_URL,
