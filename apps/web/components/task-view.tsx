@@ -117,6 +117,28 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
    * claiming it was running. Keyed on the live-to-finished edge, so it fires
    * once rather than on every SSE tick.
    */
+  /*
+   * Steps that arrived after this page was opened.
+   *
+   * Everything present on first paint is history and should simply be there;
+   * only what turns up while somebody is watching is worth animating. Without
+   * the distinction a completed task replayed its whole timeline on load and
+   * looked like it was still running.
+   */
+  const seenEvents = useRef<Set<string> | null>(null);
+  const [freshEvents, setFreshEvents] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (seenEvents.current === null) {
+      seenEvents.current = new Set(task.events.map((e) => e.id));
+      return;
+    }
+    const arrived = task.events.filter((e) => !seenEvents.current!.has(e.id));
+    if (arrived.length === 0) return;
+    for (const event of arrived) seenEvents.current.add(event.id);
+    setFreshEvents((prev) => new Set([...prev, ...arrived.map((e) => e.id)]));
+  }, [task.events]);
+
   const wasLive = useRef(live);
   useEffect(() => {
     if (wasLive.current && !live && !gone) router.refresh();
@@ -456,16 +478,26 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
           <ol className="progress-list">
             {task.events.map((event, index) => {
               const isLast = index === task.events.length - 1;
+              const state = isLast && live ? 'active' : 'done';
               return (
                 <li
                   key={event.id}
                   className="progress-item"
-                  data-latest={isLast && live ? 'true' : 'false'}
+                  data-state={state}
+                  // Only steps that arrived while this page was open animate
+                  // in. Without this every step slid in on first paint, which
+                  // makes a finished task look like it is still working.
+                  data-fresh={freshEvents.has(event.id) ? 'true' : undefined}
                 >
                   <span className="progress-marker" aria-hidden>
-                    {isLast && live ? '●' : '✓'}
+                    {state === 'done' ? <CheckIcon size={11} /> : null}
                   </span>
                   <span>{event.message}</span>
+                  {event.createdAt ? (
+                    <time className="progress-time" dateTime={event.createdAt}>
+                      {formatTime(event.createdAt)}
+                    </time>
+                  ) : null}
                 </li>
               );
             })}
