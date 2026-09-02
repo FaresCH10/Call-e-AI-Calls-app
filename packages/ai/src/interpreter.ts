@@ -187,6 +187,11 @@ const OUTPUT_SCHEMA: Schema = {
       description:
         'A single short question, ONLY if the request genuinely cannot proceed without it. Otherwise null.',
     }),
+    impossibleReason: nullable({
+      type: Type.STRING,
+      description:
+        'One plain sentence explaining why no phone call could ever satisfy this request, ONLY when that is true. Null for anything merely unusual, rare or expensive.',
+    }),
     locationText: nullable({
       type: Type.STRING,
       description: 'Location as the user expressed it, e.g. "near me", "Dublin 2". Null if none.',
@@ -241,6 +246,7 @@ const OUTPUT_SCHEMA: Schema = {
     'authorizationRequirement',
     'isEmergency',
     'clarificationNeeded',
+    'impossibleReason',
     'locationText',
     'radiusKm',
     'budgetAmount',
@@ -272,6 +278,7 @@ const OUTPUT_SCHEMA: Schema = {
     'authorizationRequirement',
     'isEmergency',
     'clarificationNeeded',
+    'impossibleReason',
     'locationText',
     'radiusKm',
     'budgetAmount',
@@ -309,6 +316,20 @@ How to decide the fields:
 - authorizationRequirement: none for information_only; user_confirmation when a real commitment would be made; explicit_credentials when the business will need identifying details only the user can supply (date of birth, an account or prescription number); not_supported if this should not be attempted by phone at all.
 
 - isEmergency: true ONLY for genuine emergencies needing fire/ambulance/police now. Never true for "urgent" plumbing or a same-day repair.
+
+- impossibleReason: almost always null. Set it ONLY when no amount of telephoning could ever satisfy the request, and say why in one plain sentence addressed to the user.
+
+  Set it when the thing asked for does not exist or cannot be obtained:
+  * a product that does not exist ("dinosaur meat", "a time machine", "unicorn milk")
+  * a place with no businesses to ring ("on Mars", "at the bottom of the ocean", "in Atlantis")
+  * something no business can do ("phone my dead grandfather", "call me yesterday")
+  * something a phone call cannot achieve ("call the shop and have them teleport it here")
+
+  Do NOT set it for anything that is merely unusual, rare, expensive, regulated, or unlikely to be found nearby. Real businesses sell surprising things. Camel milk, taxidermy, a left-handed guitar, halal wagyu, a 3am locksmith, an obscure car part -- all real, all findable, all null. If you are unsure whether something exists, assume it does and leave this null: Dial finding nothing is a fine outcome, and wrongly refusing a real request is not.
+
+  When you set impossibleReason, still fill the other fields as best you can. Do not also set clarificationNeeded: there is no question that would fix it.
+
+  Write it as an explanation, not a refusal. "Dinosaur meat does not exist, so there is no business that could sell it." not "Invalid request".
 
 - clarificationNeeded: almost always null. Dial's promise is that the user does not get interrogated. Ask ONLY when proceeding is unsafe or the task is impossible without the answer — for example a purchase with no stated budget, or a medical request with no named pharmacy. Do NOT ask for things you can reasonably default: search radius, how many businesses to call, or a time when the user said "tonight".
 
@@ -517,6 +538,7 @@ export function toDialTask(raw: Record<string, unknown>): InterpretOutput {
     sensitivity: raw['sensitivity'],
     authorizationRequirement: raw['authorizationRequirement'],
     clarificationNeeded: str(raw['clarificationNeeded']),
+    impossibleReason: str(raw['impossibleReason']),
     isEmergency: raw['isEmergency'] === true,
   };
 

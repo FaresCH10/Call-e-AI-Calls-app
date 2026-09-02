@@ -45,6 +45,7 @@ import {
   newRecipientId,
 } from '@dial/orchestrator';
 import type { SessionUser } from '@dial/schemas';
+import { describeValidationIssue } from './user-message.js';
 
 /**
  * Business automation routes. Every handler resolves the business through the
@@ -62,9 +63,9 @@ function fail(reply: FastifyReply, status: number, code: string, message: string
   return reply.code(status).send({ error: { code, message } });
 }
 
+/** The same wording the rest of the API uses. */
 function firstIssue(error: { issues: Array<{ path: (string | number)[]; message: string }> }): string {
-  const issue = error.issues[0];
-  return issue ? `${issue.path.join('.') || 'request'}: ${issue.message}` : 'Invalid request.';
+  return describeValidationIssue(error);
 }
 
 export async function registerBusinessRoutes(app: FastifyInstance, deps: BusinessRouteDeps): Promise<void> {

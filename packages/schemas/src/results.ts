@@ -62,6 +62,44 @@ export function callProgressLabel(
   return CALL_DISPOSITION_LABELS.pending;
 }
 
+/**
+ * Why a business has nothing recorded against it.
+ *
+ * An empty notes cell used to render as a dash, which reads as "no data" and
+ * says nothing about whether the business was unhelpful, never answered, or
+ * hung up. Those are different facts and the user is entitled to which one it
+ * was -- particularly since blaming a business that was never reached would be
+ * unfair to it.
+ *
+ * Returns null when the call did produce notes, so a caller can fall through
+ * to showing them.
+ */
+export function describeMissingNotes(disposition: CallDisposition): string | null {
+  switch (disposition) {
+    case 'no_answer':
+      return 'Nobody answered';
+    case 'voicemail':
+      return 'Reached voicemail';
+    case 'refused':
+      return 'Declined to say';
+    case 'answered_no_answer_to_question':
+      return 'Answered, but would not give the details';
+    case 'failed':
+      return 'The call could not be completed';
+    case 'needs_review':
+      return 'Answer could not be read';
+    case 'not_needed':
+      return 'Not called';
+    case 'pending':
+      return 'Still calling';
+    case 'answered_useful':
+      // They answered and were helpful; there simply was nothing extra to note.
+      return 'No extra details given';
+    default:
+      return null;
+  }
+}
+
 /** One call Dial placed, with everything needed to justify the outcome. */
 export const callRecordSchema = z.object({
   id: z.string(),
@@ -103,6 +141,20 @@ export const comparableOutcomeSchema = z.object({
   /** Explains any adjustment, e.g. "callout fee added". */
   normalizationNotes: z.array(z.string()).default([]),
   viable: z.boolean(),
+  /**
+   * Whether this business can do it when the user asked for it.
+   *
+   * Null when the user named no timing, which is most requests -- there is
+   * nothing to meet, so it cannot count for or against anybody.
+   */
+  meetsTiming: z.boolean().nullable().default(null),
+  /**
+   * How sure the extraction is that the answer was understood correctly.
+   *
+   * Used as a tie-break: at the same price, an answer Dial is confident it
+   * heard right is worth more than one it is not.
+   */
+  confidence: z.enum(['high', 'medium', 'low']).nullable().default(null),
   highlights: z.array(z.string()).default([]),
   conditions: z.array(z.string()).default([]),
   rank: z.number().int().nullable(),

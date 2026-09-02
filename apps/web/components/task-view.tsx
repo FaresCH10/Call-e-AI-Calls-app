@@ -2,7 +2,12 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { callProgressLabel, type TaskDetail, type ComparableOutcome } from '@dial/schemas';
+import {
+  callProgressLabel,
+  describeMissingNotes,
+  type TaskDetail,
+  type ComparableOutcome,
+} from '@dial/schemas';
 import { TaskTimer } from './task-timer';
 import { proxied, ApiError } from '@/lib/api';
 import { CheckIcon, PhoneIcon, MapPinIcon } from './icons';
@@ -530,8 +535,20 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
                           </div>
                         ) : null}
                       </td>
+                      {/*
+                        What the business actually said. When there is nothing,
+                        say why rather than printing a dash: "no answer" and
+                        "answered but would not say" are different facts, and
+                        a dash blames neither while explaining nothing.
+                      */}
                       <td>
-                        {outcome.highlights.slice(0, 3).join(' · ') || '—'}
+                        {outcome.highlights.length > 0 ? (
+                          outcome.highlights.slice(0, 3).join(' · ')
+                        ) : (
+                          <span style={{ color: 'var(--color-text-muted)' }}>
+                            {describeMissingNotes(outcome.disposition) ?? '—'}
+                          </span>
+                        )}
                         {outcome.normalizationNotes.length > 0 ? (
                           <div style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>
                             {outcome.normalizationNotes.join(' · ')}

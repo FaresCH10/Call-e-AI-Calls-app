@@ -111,6 +111,22 @@ export const dialTaskSchema = z.object({
   clarificationNeeded: z.string().max(300).nullable().default(null),
   /** True only for requests that must go to emergency services, never through a call pipeline. */
   isEmergency: z.boolean().default(false),
+  /**
+   * Set when the request asks for something that does not exist, in the
+   * user's own terms -- not "hard to find" but "cannot be found by ringing
+   * anybody".
+   *
+   * Without this the interpreter had no way to say no. Asked to find dinosaur
+   * meat in Dubai it produced a perfectly well-formed task, asked four
+   * clarifying questions about it, discovered ninety-one butchers and began
+   * telephoning them. Every step was working correctly; the premise was
+   * never checked.
+   *
+   * A reason here stops the task before a single call, and the text is shown
+   * to the user as-is, so it has to read as an explanation rather than a
+   * refusal code.
+   */
+  impossibleReason: z.string().max(300).nullable().default(null),
 });
 export type DialTask = z.infer<typeof dialTaskSchema>;
 

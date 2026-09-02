@@ -229,3 +229,213 @@ describe('compareOutcomes — reservations', () => {
     expect(result.headline).toMatch(/best verified option/i);
   });
 });
+
+
+describe('what the notes column carries', () => {
+  const candidates = new Map([
+    ['c1', candidate('c1', 'FixLab', { distanceMeters: 1700 })],
+    ['c2', candidate('c2', 'MobileCare', { distanceMeters: 600 })],
+  ]);
+
+  /**
+   * The comparison table has its own Distance column. Distance was also being
+   * pushed into `highlights`, so every row printed "1.7 km away" twice, side
+   * by side -- and because only three highlights fit, it pushed a real answer
+   * out of view.
+   */
+  it('keeps distance out of the notes', () => {
+    const result = compareOutcomes({
+      task: baseTask,
+      family: CALL_FAMILIES.repair_quote,
+      candidatesById: candidates,
+      discoveredCount: 5,
+      calls: [
+        call('a', 'c1', {
+          can_repair: 'yes',
+          quoted_price: 89,
+          currency: 'EUR',
+          same_day_available: 'yes',
+          warranty: '90-day warranty',
+          confidence: 'high',
+        }),
+      ],
+    });
+
+    const notes = result.best!.highlights;
+    expect(notes).toContain('Same day');
+    expect(notes).toContain('90-day warranty');
+    expect(notes.some((n) => /km away/.test(n))).toBe(false);
+  });
+
+  it('still gives distance as a reason this one won', () => {
+    // The card that shows rank reasons has no distance column of its own, so
+    // dropping it entirely would lose a genuine reason.
+    const result = compareOutcomes({
+      task: baseTask,
+      family: CALL_FAMILIES.repair_quote,
+      candidatesById: candidates,
+      discoveredCount: 5,
+      calls: [call('a', 'c1', { can_repair: 'yes', quoted_price: 89, currency: 'EUR', confidence: 'high' })],
+    });
+
+    expect(result.best!.rankReasons.some((r) => r === '1.7 km away')).toBe(true);
+  });
+
+  it('carries the disposition, so an empty notes cell can say why', () => {
+    const result = compareOutcomes({
+      task: baseTask,
+      family: CALL_FAMILIES.repair_quote,
+      candidatesById: candidates,
+      discoveredCount: 5,
+      calls: [
+        call('a', 'c1', null, { disposition: 'no_answer' }),
+        call('b', 'c2', null, { disposition: 'voicemail' }),
+      ],
+    });
+
+    const all = [result.best, ...result.alternatives, ...result.unusable].filter(Boolean);
+    const dispositions = all.map((o) => o!.disposition);
+    expect(dispositions).toContain('no_answer');
+    expect(dispositions).toContain('voicemail');
+    // And nothing was invented about businesses that never spoke.
+    for (const outcome of all) expect(outcome!.highlights).toEqual([]);
+  });
+});
+
+
+describe('ranking is not price alone', () => {
+  /**
+   * The case that exposed it:
+   *
+   *   Business A  $50  no availability
+   *   Business B  $65  available today
+   *   Business C  $60  available tomorrow
+   *
+   * Sorting on price alone recommends A, which said it cannot do the thing
+   * the user asked for. The code did exactly that while its own comment
+   * claimed availability and rating were considered.
+   */
+  const candidates = new Map([
+    ['a', candidate('a', 'Business A', { distanceMeters: 500, rating: 4.0, reviewCount: 10 })],
+    ['b', candidate('b', 'Business B', { distanceMeters: 900, rating: 4.5, reviewCount: 200 })],
+    ['c', candidate('c', 'Business C', { distanceMeters: 700, rating: 4.2, reviewCount: 50 })],
+  ]);
+
+  const today = {
+    ...baseTask,
+    constraints: { ...baseTask.constraints, date: '2026-09-01' },
+  };
+
+  it('prefers the business that can do it when asked, over the cheaper one that cannot', () => {
+    const result = compareOutcomes({
+      task: today,
+      family: CALL_FAMILIES.repair_quote,
+      candidatesById: candidates,
+      discoveredCount: 3,
+      calls: [
+        call('a', 'a', { can_repair: 'yes', quoted_price: 50, currency: 'USD', same_day_available: 'no', confidence: 'high' }),
+        call('b', 'b', { can_repair: 'yes', quoted_price: 65, currency: 'USD', same_day_available: 'yes', confidence: 'high' }),
+        call('c', 'c', { can_repair: 'yes', quoted_price: 60, currency: 'USD', same_day_available: 'no', confidence: 'high' }),
+      ],
+    });
+
+    expect(result.best?.candidate.name).toBe('Business B');
+  });
+
+  it('says plainly that a cheaper option existed, and why it lost', () => {
+    // Otherwise a user reading the table would spot the $50 before Dial
+    // admitted to it.
+    const result = compareOutcomes({
+      task: today,
+      family: CALL_FAMILIES.repair_quote,
+      candidatesById: candidates,
+      discoveredCount: 3,
+      calls: [
+        call('a', 'a', { can_repair: 'yes', quoted_price: 50, currency: 'USD', same_day_available: 'no', confidence: 'high' }),
+        call('b', 'b', { can_repair: 'yes', quoted_price: 65, currency: 'USD', same_day_available: 'yes', confidence: 'high' }),
+      ],
+    });
+
+    const caveats = result.caveats.join(' ');
+    expect(caveats).toMatch(/Business A quoted less/);
+    expect(caveats).toMatch(/could not do it when you asked/);
+    expect(result.best?.rankReasons).toContain('Can do it when you asked');
+  });
+
+  it('still ranks on price when the user named no timing', () => {
+    // Most requests are like this. Inventing a timing preference would
+    // reorder results around something nobody asked about.
+    const result = compareOutcomes({
+      task: baseTask,
+      family: CALL_FAMILIES.repair_quote,
+      candidatesById: candidates,
+      discoveredCount: 3,
+      calls: [
+        call('a', 'a', { can_repair: 'yes', quoted_price: 50, currency: 'USD', same_day_available: 'no', confidence: 'high' }),
+        call('b', 'b', { can_repair: 'yes', quoted_price: 65, currency: 'USD', same_day_available: 'yes', confidence: 'high' }),
+      ],
+    });
+
+    expect(result.best?.candidate.name).toBe('Business A');
+    expect(result.best?.meetsTiming).toBeNull();
+    // Nothing to apologise for: the cheapest did win.
+    expect(result.caveats.join(' ')).not.toMatch(/quoted less/);
+  });
+
+  it('does not promote a business on a maybe', () => {
+    // "unknown" availability is not a promise. Ranking above a cheaper option
+    // is a claim, and a claim needs evidence.
+    const result = compareOutcomes({
+      task: today,
+      family: CALL_FAMILIES.repair_quote,
+      candidatesById: candidates,
+      discoveredCount: 2,
+      calls: [
+        call('a', 'a', { can_repair: 'yes', quoted_price: 50, currency: 'USD', confidence: 'high' }),
+        call('b', 'b', { can_repair: 'yes', quoted_price: 65, currency: 'USD', confidence: 'high' }),
+      ],
+    });
+
+    expect(result.best?.candidate.name).toBe('Business A');
+  });
+
+  it('breaks a price tie on the answer it is surest about', () => {
+    const result = compareOutcomes({
+      task: baseTask,
+      family: CALL_FAMILIES.repair_quote,
+      candidatesById: candidates,
+      discoveredCount: 2,
+      calls: [
+        call('a', 'a', { can_repair: 'yes', quoted_price: 60, currency: 'USD', confidence: 'high' }, {
+          completionConfidence: { score: 0.2, label: 'low' },
+        }),
+        call('b', 'b', { can_repair: 'yes', quoted_price: 60, currency: 'USD', confidence: 'high' }, {
+          completionConfidence: { score: 0.95, label: 'high' },
+        }),
+      ],
+    });
+
+    expect(result.best?.candidate.name).toBe('Business B');
+    expect(result.best?.confidence).toBe('high');
+  });
+
+  it('breaks a remaining tie on rating, then on how many rated it', () => {
+    const sameEverything = new Map([
+      ['a', candidate('a', 'Fewer Reviews', { rating: 4.8, reviewCount: 3, distanceMeters: 500 })],
+      ['b', candidate('b', 'Many Reviews', { rating: 4.8, reviewCount: 400, distanceMeters: 500 })],
+    ]);
+    const result = compareOutcomes({
+      task: baseTask,
+      family: CALL_FAMILIES.repair_quote,
+      candidatesById: sameEverything,
+      discoveredCount: 2,
+      calls: [
+        call('a', 'a', { can_repair: 'yes', quoted_price: 60, currency: 'USD', confidence: 'high' }),
+        call('b', 'b', { can_repair: 'yes', quoted_price: 60, currency: 'USD', confidence: 'high' }),
+      ],
+    });
+
+    // 4.8 from three people is not better evidence than 4.8 from four hundred.
+    expect(result.best?.candidate.name).toBe('Many Reviews');
+  });
+});

@@ -75,6 +75,7 @@ import {
   revokeSession,
 } from './auth.js';
 import { RealtimeHub } from './realtime.js';
+import { describeValidationIssue, describeRequestFailure } from './user-message.js';
 import { registerBusinessRoutes } from './business-routes.js';
 
 const SESSION_COOKIE = 'dial_session';
@@ -277,7 +278,9 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
         reply,
         503,
         'llm_not_configured',
-        'Dial cannot understand requests until a language model is configured on the server.',
+        // The code stays exact for the log; the sentence is for the person who
+        // just wanted a plumber and does not run this server.
+        'Dial’s AI service is not available right now. Please try again in a few minutes.',
       );
     }
 
@@ -495,7 +498,9 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
         reply,
         503,
         'llm_not_configured',
-        'Dial cannot understand requests until a language model is configured on the server.',
+        // The code stays exact for the log; the sentence is for the person who
+        // just wanted a plumber and does not run this server.
+        'Dial’s AI service is not available right now. Please try again in a few minutes.',
       );
     }
 
@@ -1158,7 +1163,7 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
   });
 
   app.setNotFoundHandler((request, reply) =>
-    reply.code(404).send({ error: { code: 'not_found', message: 'No such endpoint.' } }),
+    reply.code(404).send({ error: { code: 'not_found', message: 'Dial could not find that page.' } }),
   );
 
   await registerBusinessRoutes(app, { db, ctx });
@@ -1176,8 +1181,15 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
     return reply.code(status).send({
       error: {
         code: status === 429 ? 'rate_limited' : status >= 500 ? 'internal_error' : 'invalid_request',
-        // Never leak an internal message to the client.
-        message: status >= 500 ? 'Something went wrong on Dial’s side.' : error.message,
+        /*
+         * Never the framework's own words, at any status.
+         *
+         * 5xx was already handled; 4xx was not, so a malformed body answered
+         * with "Body is not valid JSON but content-type is set to
+         * 'application/json'". That is Fastify talking to a developer. The
+         * precise text is in the log above, where it belongs.
+         */
+        message: describeRequestFailure(status),
       },
     });
   });
@@ -1195,9 +1207,12 @@ function setSessionCookie(reply: FastifyReply, token: string, expiresAt: Date, c
   });
 }
 
+/**
+ * Kept as a thin alias so every call site reads the same as before. The
+ * wording lives in user-message.ts, next to the other half of this split.
+ */
 function firstIssue(error: { issues: Array<{ path: (string | number)[]; message: string }> }): string {
-  const issue = error.issues[0];
-  return issue ? `${issue.path.join('.') || 'request'}: ${issue.message}` : 'Invalid request.';
+  return describeValidationIssue(error);
 }
 
 export { TASK_STATE_LABELS };

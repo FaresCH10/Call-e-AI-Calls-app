@@ -1,4 +1,4 @@
-﻿# Dial
+# Dial
 
 **Tell Dial what you need done in the real world. It finds who to contact, calls them, and returns the verified result.**
 
@@ -6,24 +6,54 @@
 "Find the cheapest place near me that can replace an iPhone 13 screen today."
 
    12 repair shops found near Dublin 2
-   4 contacted Â· 3 answered Â· 2 gave a comparable price
+   4 contacted · 3 answered · 2 gave a comparable price
 
-   FixLab â€” EUR 89.00
-   âœ“ Same day  âœ“ 90-day warranty  âœ“ 2.1 km away
+   FixLab — EUR 89.00
+   ✓ Same day  ✓ 90-day warranty  ✓ 2.1 km away
 
    Lowest verified quote among the 2 businesses that gave Dial a
    comparable price. Verified by phone at 15:42.
 ```
 
-Dial now has two orchestration modes: **consumer tasks** (describe what you
-need; Dial finds who to contact, calls them, returns the verified result) and
-**business workflows** (a business account schedules CALL-E to do its phone
-work -- appointment reminders, customer callbacks, custom jobs -- with every
-result recorded and explainable). Both share the same provider and durable
-infrastructure. See `docs/ARCHITECTURE.md`.
 Dial does not tell you it found the cheapest shop in the city. It tells you the
 lowest price among the shops it actually rang, how many answered, and what each
 one said. That distinction is the product.
+
+## Try it
+
+<!--
+  Fill these in as they go live and delete the ones that do not apply. They are
+  written out rather than linked because a portfolio link that 404s is worse
+  than no link: the first thing a reviewer clicks should work.
+-->
+
+| | |
+| --- | --- |
+| **Live demo** | _not yet deployed_ |
+| **Android** | build from source: `npm run dev:mobile` (see [Setup](#setup)) |
+| **iOS** | not yet built |
+| **Demo video** | _coming soon_ |
+
+**Running it yourself** takes one free API key. See [Setup](#setup):
+
+- The database is embedded (PGlite), so there is nothing to install or host.
+- Calls are **simulated** unless you supply a CALL-E key, so no phone rings and
+  nothing is billed.
+- Understanding a request needs a Gemini key. Without one the server still
+  boots and serves, but creating a task answers "Dial's AI service is not
+  available right now".
+
+## Two products, one engine
+
+**Consumer tasks.** Describe what you need; Dial finds who to contact, calls
+them, and returns the verified result.
+
+**Business workflows.** A business account puts CALL-E to work on its own phone
+jobs -- appointment reminders, customer callbacks, custom jobs -- with every
+outcome recorded and explainable.
+
+Both run on the same provider, the same durable queue and the same honesty
+rules. Full detail in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 
@@ -33,7 +63,7 @@ one said. That distinction is the product.
   businesses with real phone numbers, live, with no API key. A Google Places
   adapter activates automatically when a key is supplied.
 - **Real phone calls** through the official `@call-e/calle` SDK, built against
-  its shipped type definitions â€” verified, not inferred from prose docs.
+  its shipped type definitions — verified, not inferred from prose docs.
 - **Real PostgreSQL**, including in tests, via PGlite (Postgres compiled to
   WASM). Real constraints, real transactions, real `FOR UPDATE SKIP LOCKED`.
 - **Real native mobile app.** Expo / React Native, Hermes bytecode, native tabs
@@ -47,7 +77,7 @@ Honesty is the point of this product, so:
 
 - **A real call has now been placed.** `call_3kj1Yo8peCmczk6WKjjroA`, to an
   owner-authorised number, through the live CALL-E API with `TEST_PROVIDER=real`.
-  It reached the handset and was **declined by the recipient** â€” so the happy
+  It reached the handset and was **declined by the recipient** — so the happy
   path (a conversation, a transcript, an extracted answer) is still unverified,
   but the dispatch, the terminal reconciliation and the honest-failure handling
   all are. See [`docs/TESTING.md`](docs/TESTING.md).
@@ -70,42 +100,42 @@ together.
 
 ```
  User instruction
-        â†“
+        ↓
  Task Interpreter            packages/ai        schema-constrained, model-driven
-        â†“
+        ↓
  Constraint + Policy         packages/domain    plain TypeScript, no model input
-        â†“
+        ↓
  Business Discovery          packages/search    OSM / Google Places
-        â†“
+        ↓
  Candidate Verification      packages/domain    E.164 only, never a guess
-        â†“
+        ↓
  Call Planner                packages/calle     goals + boundaries, not a script
-        â†“
+        ↓
       CALL-E                 @call-e/calle
-        â†“
+        ↓
  Structured outcomes         packages/schemas   per-family result schemas
-        â†“
- Evidence Validator          packages/domain    null result â‡’ "needs review"
-        â†“
+        ↓
+ Evidence Validator          packages/domain    null result ⇒ "needs review"
+        ↓
  Comparison Engine           packages/domain    honest tallies, no conversion
-        â†“
+        ↓
  Final result
 ```
 
 ```
 apps/
-  api/        Fastify Â· auth Â· REST Â· SSE Â· webhook receiver
-  worker/     durable job loop â€” all phone work happens here
-  web/        Next.js 16 App Router Â· BFF proxy Â· server-rendered
-  mobile/     Expo Router Â· React Native Â· secure-store
+  api/        Fastify · auth · REST · SSE · webhook receiver
+  worker/     durable job loop — all phone work happens here
+  web/        Next.js 16 App Router · BFF proxy · server-rendered
+  mobile/     Expo Router · React Native · secure-store
 packages/
   config/         env loading + boot-time coherence checks
-  schemas/        Zod contracts Â· DialTask Â· CALL-E result schemas
-  domain/         phone Â· policy Â· ranking Â· comparison Â· injection defence
-  database/       Drizzle schema Â· migrations Â· Postgres job queue
-  search/         discovery providers Â· SSRF-guarded HTTP
+  schemas/        Zod contracts · DialTask · CALL-E result schemas
+  domain/         phone · policy · ranking · comparison · injection defence
+  database/       Drizzle schema · migrations · Postgres job queue
+  search/         discovery providers · SSRF-guarded HTTP
   ai/             Gemini task interpreter
-  calle/          CALL-E provider Â· fake provider Â· call planner
+  calle/          CALL-E provider · fake provider · call planner
   orchestrator/   the task pipeline and worker runner
   api-client/     one typed client, used by web and mobile
   ui/             design tokens shared by both clients
@@ -115,14 +145,14 @@ packages/
 enforced only on the server. Clients import them purely to grey out buttons; a
 hostile client gains nothing.
 
-Full detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) Â·
+Full detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
 [`docs/DECISIONS.md`](docs/DECISIONS.md)
 
 ---
 
 ## Setup
 
-**Requires:** Node â‰¥ 20.11 (developed on 24.5). No Docker, no Postgres server.
+**Requires:** Node ≥ 20.11 (developed on 24.5). No Docker, no Postgres server.
 
 ```bash
 cp .env.example .env
@@ -142,7 +172,7 @@ npm run db:migrate
 | --- | --- | --- |
 | `LLM_API_KEY` | Understanding requests | `POST /api/tasks` returns `503 llm_not_configured` |
 | `CALLE_API_KEY` | Placing real calls | Runs the fake provider; `TEST_PROVIDER=real` refuses to boot |
-| `OSM_CONTACT_EMAIL` | OpenStreetMap usage policy | Discovery works but is not a good citizen â€” set it |
+| `OSM_CONTACT_EMAIL` | OpenStreetMap usage policy | Discovery works but is not a good citizen — set it |
 | `GOOGLE_PLACES_API_KEY` | Ratings, review counts, better numbers | Falls back to OpenStreetMap alone |
 | `EXPO_ACCESS_TOKEN` | Higher push-delivery rate limits | Push notifications still deliver |
 
@@ -155,9 +185,9 @@ model is `gemini-3.6-flash`; set `LLM_MODEL` to use another.
 ## Running it
 
 ```bash
-npm run dev:api      # http://localhost:4000 â€” runs the job loop in-process on PGlite
+npm run dev:api      # http://localhost:4000 — runs the job loop in-process on PGlite
 npm run dev:web      # http://localhost:3000
-npm run dev:mobile   # Expo â€” set EXPO_PUBLIC_API_URL to your LAN IP for a device
+npm run dev:mobile   # Expo — set EXPO_PUBLIC_API_URL to your LAN IP for a device
 ```
 
 **About the worker.** In production it is a separate process, because phone work
@@ -165,7 +195,7 @@ must not depend on an HTTP request staying open and a web deploy must not
 abandon calls in flight:
 
 ```bash
-npm run dev:worker   # requires DATABASE_URL â€” see below
+npm run dev:worker   # requires DATABASE_URL — see below
 ```
 
 Locally the default database is PGlite, which is embedded and **single-process**:
@@ -208,7 +238,7 @@ TEST_PROVIDER=real npm run calle:verify -- +353871234567
 
 `calle:verify` places one real call to **one number you pass explicitly**, prints
 the real CALL-E call id, waits for the terminal result and persists it. It will
-not dial a number discovered from a directory â€” that has to be a deliberate act.
+not dial a number discovered from a directory — that has to be a deliberate act.
 
 ---
 
@@ -239,16 +269,16 @@ BLOCKED and why.
   writing anything.
 - Outbound research HTTP is allowlisted by host and re-checked on every redirect
   hop, so a business listing cannot make the server fetch an internal address.
-- External text â€” listings, web pages, transcripts â€” is wrapped in an untrusted
+- External text — listings, web pages, transcripts — is wrapped in an untrusted
   block and never carries authority. Budgets, call limits and permissions are
   decided in TypeScript from database rows.
 
-[`docs/SECURITY.md`](docs/SECURITY.md) Â· [`docs/PRIVACY.md`](docs/PRIVACY.md)
+[`docs/SECURITY.md`](docs/SECURITY.md) · [`docs/PRIVACY.md`](docs/PRIVACY.md)
 
 ---
 
 ## Licence and attribution
 
-Business data from OpenStreetMap is Â© OpenStreetMap contributors, available
+Business data from OpenStreetMap is © OpenStreetMap contributors, available
 under the Open Database Licence. Every candidate carries its `sourceUrl` so the
 provenance is visible in the UI, not just in a footer.

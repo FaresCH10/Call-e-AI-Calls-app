@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { sql } from 'drizzle-orm';
 import { presentableFailure } from '@dial/orchestrator';
+import { describeValidationIssue, describeRequestFailure } from '../user-message.js';
 import { InterpreterBusyError, InterpretationFailedError } from '@dial/ai';
 import {
   createHarness,
@@ -22,9 +23,13 @@ import {
  * transient overload.
  */
 
-let h: Harness;
+let h: Harness | undefined;
 afterEach(async () => {
+  // Cleared as well as closed: this file mixes tests that build a harness with
+  // pure ones that do not, and without this the hook tried to close an already
+  // closed database and failed whichever test happened to run next.
   await h?.close();
+  h = undefined;
 });
 
 describe('presentableFailure', () => {
@@ -197,5 +202,110 @@ describe('a transient model outage', () => {
     expect(detail.state).toBe('failed');
     expect(detail.headline).toMatch(/could not understand that request/i);
     expect(detail.headline).not.toContain('{');
+  });
+});
+
+describe('what the API says when a request is rejected', () => {
+  /*
+   * The code and the sentence are different audiences. `llm_not_configured`
+   * is exactly right in a log; it is useless to somebody who wanted a plumber.
+   * The API sends both, and nothing in between leaks.
+   */
+  const NEVER_SHOWN = [
+    /content-type/i,
+    /\bJSON\b/,
+    /Expected \w+, received/i,
+    /\bundefined\b/,
+    /\bnull\b/,
+    /\bschema\b/i,
+    /\bendpoint\b/i,
+    /configured on the server/i,
+    /\b(4|5)\d\d\b/,
+    /_/,
+  ];
+
+  function expectHuman(message: string) {
+    for (const pattern of NEVER_SHOWN) {
+      expect(message, `"${message}" contains ${pattern}`).not.toMatch(pattern);
+    }
+    // A sentence, not a fragment.
+    expect(message.length).toBeGreaterThan(10);
+    expect(message[0]).toBe(message[0]!.toUpperCase());
+  }
+
+  it('names the field a person can actually fix', () => {
+    expect(
+      describeValidationIssue({
+        issues: [{ path: ['password'], message: 'String must contain at least 12 character(s)' }],
+      }),
+    ).toBe('The password is too short.');
+
+    expect(
+      describeValidationIssue({ issues: [{ path: ['name'], message: 'Required' }] }),
+    ).toBe('Please fill in the name.');
+
+    expect(
+      describeValidationIssue({ issues: [{ path: ['email'], message: 'Invalid email' }] }),
+    ).toBe('That email address does not look right.');
+  });
+
+  it('says the field in the words a form would', () => {
+    // Zod reports maxAuthorizedSpend; a person read a label, not a property.
+    expect(
+      describeValidationIssue({
+        issues: [{ path: ['policy', 'maxAuthorizedSpend'], message: 'Required' }],
+      }),
+    ).toBe('Please fill in the max authorized spend.');
+  });
+
+  it('does not repeat a library’s phrasing when there is no field to name', () => {
+    // This was reaching users as "request: Expected object, received string",
+    // which describes the request body they never typed.
+    const message = describeValidationIssue({
+      issues: [{ path: [], message: 'Expected object, received string' }],
+    });
+    expectHuman(message);
+  });
+
+  it('never repeats the framework’s words for a malformed request', () => {
+    // Fastify's own: "Body is not valid JSON but content-type is set to..."
+    for (const status of [400, 413, 415, 429, 500, 503]) {
+      expectHuman(describeRequestFailure(status));
+    }
+  });
+
+  it('keeps the machine code precise while the sentence stays human', async () => {
+    h = await createHarness({});
+    const response = await h.app.inject({
+      method: 'POST',
+      url: '/api/auth/sign-up',
+      payload: { email: 'nope', password: 'short', name: '' },
+    });
+    const body = response.json() as { error: { code: string; message: string } };
+
+    // The code is for the log and for support.
+    expect(body.error.code).toBe('invalid_request');
+    // The message is for the person.
+    expectHuman(body.error.message);
+  });
+
+  it('does not tell the user about server configuration', async () => {
+    // `llm_not_configured` stays as the code; the sentence does not mention
+    // a server the user does not run.
+    h = await createHarness({ env: { LLM_API_KEY: '' } });
+    const user = await signUp(h);
+    const response = await h.app.inject({
+      method: 'POST',
+      url: '/api/tasks',
+      headers: { authorization: `Bearer ${user.token}` },
+      payload: { instruction: 'Find an iPhone repair shop', idempotencyKey: 'k1' },
+    });
+
+    if (response.statusCode === 503) {
+      const body = response.json() as { error: { code: string; message: string } };
+      expect(body.error.code).toBe('llm_not_configured');
+      expectHuman(body.error.message);
+      expect(body.error.message).toMatch(/try again/i);
+    }
   });
 });

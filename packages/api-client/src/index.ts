@@ -101,7 +101,9 @@ export class DialApiClient {
       const error = (body as { error?: { code?: string; message?: string } })?.error;
       throw new ApiError(
         error?.code ?? 'request_failed',
-        error?.message ?? `Request failed (${response.status}).`,
+        // A status code is not a message. This only fires when the body was
+        // unreadable, which the user can do nothing about either way.
+        error?.message ?? 'Dial could not complete that just now. Please try again.',
         response.status,
       );
     }

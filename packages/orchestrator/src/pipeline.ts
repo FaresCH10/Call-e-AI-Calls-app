@@ -153,6 +153,22 @@ export async function handleInterpret(
   const dialTask = interpreted.task;
 
   // Safety gates, evaluated before anything is stored as actionable.
+  /*
+   * The premise, checked before the mechanics.
+   *
+   * Asked to find dinosaur meat in Dubai, every stage behaved correctly: the
+   * request parsed, four clarifying questions were asked about it, ninety-one
+   * butchers were discovered, and Dial started telephoning them. Nothing was
+   * broken except that nobody had asked whether the thing exists.
+   *
+   * First, so no question is asked and no number is dialled about something
+   * that cannot be found. The interpreter's own sentence is what the user
+   * reads -- it explains the specific request rather than refusing generically.
+   */
+  if (dialTask.impossibleReason) {
+    await failTask(ctx, task.id, 'impossible_request', dialTask.impossibleReason);
+    return;
+  }
   if (dialTask.isEmergency) {
     await failTask(
       ctx,
