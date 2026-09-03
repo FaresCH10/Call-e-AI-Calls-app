@@ -3,7 +3,7 @@ import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
-import { eq, and, desc, lt, isNull, sql } from 'drizzle-orm';
+import { eq, and, desc, lt, isNull, isNotNull, inArray, sql } from 'drizzle-orm';
 import { config as loadConfig, type DialConfig } from '@dial/config';
 import {
   tasks,
@@ -256,8 +256,32 @@ export async function buildApp(options: BuildOptions): Promise<FastifyInstance> 
       .limit(limit + 1);
 
     const page = rows.slice(0, limit);
+
+    /*
+     * Call counts for the whole page in one query.
+     *
+     * Counting inside the map would be one query per task -- the same N+1 that
+     * makes the business list slow, and this list is the sidebar, fetched on
+     * every navigation. Only dispatched calls count: a planned row that was
+     * never dialled must not be reported as a call.
+     */
+    const counts = new Map<string, number>();
+    if (page.length > 0) {
+      const rows = await db
+        .select({ taskId: calls.taskId, n: sql<number>`count(*)::int` })
+        .from(calls)
+        .where(
+          and(
+            inArray(calls.taskId, page.map((task) => task.id)),
+            isNotNull(calls.providerCallId),
+          ),
+        )
+        .groupBy(calls.taskId);
+      for (const row of rows) counts.set(row.taskId, Number(row.n));
+    }
+
     return {
-      tasks: page.map(toTaskSummary),
+      tasks: page.map((task) => toTaskSummary(task, counts.get(task.id) ?? 0)),
       nextCursor: rows.length > limit ? (page[page.length - 1]?.createdAt ?? null) : null,
     };
   });

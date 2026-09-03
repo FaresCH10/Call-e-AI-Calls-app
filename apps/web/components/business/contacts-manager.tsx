@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { proxied, ApiError } from '@/lib/api';
 import type { BusinessContactDto, WorkflowDto } from '@dial/schemas';
 import { ContextFields, missingRequired, type ContextField } from './context-fields';
+import { ImportContacts } from './import-contacts';
 
 /**
  * The business's customer list: add, edit, search, opt out, and start a run
@@ -122,6 +123,13 @@ export function ContactsManager({ businessId }: { businessId: string }) {
           {error}
         </div>
       ) : null}
+
+      {/*
+        Placed above the single-contact form: somebody arriving with a list of
+        four hundred customers should not have to scroll past a form for
+        adding one.
+      */}
+      <ImportContacts businessId={businessId} onImported={load} />
 
       <section className="card">
         <div className="card-label">Add a customer</div>

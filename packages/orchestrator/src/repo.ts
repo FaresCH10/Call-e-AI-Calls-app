@@ -713,13 +713,36 @@ export async function audit(
 
 /* ---------------------------------------------------------------- mapping */
 
-export function toTaskSummary(row: typeof tasks.$inferSelect): TaskSummary {
+/**
+ * The business domain out of the interpreted task, when there is one.
+ *
+ * Read defensively: `interpreted` is jsonb written by an earlier version of
+ * the interpreter as often as the current one, and a task that failed before
+ * interpretation has none at all.
+ */
+function readDomain(interpreted: unknown): string | null {
+  if (!interpreted || typeof interpreted !== 'object') return null;
+  const domain = (interpreted as { domain?: unknown }).domain;
+  return typeof domain === 'string' && domain.trim() ? domain.trim() : null;
+}
+
+export function toTaskSummary(
+  row: typeof tasks.$inferSelect,
+  /**
+   * Calls actually dispatched for this task. Passed in rather than counted
+   * here: a list of twenty tasks would otherwise be twenty extra queries, and
+   * the caller can fetch them all at once.
+   */
+  callCount = 0,
+): TaskSummary {
   return {
     id: row.id,
     instruction: row.instruction,
     state: row.state as TaskState,
     stateLabel: TASK_STATE_LABELS[row.state as TaskState] ?? row.state,
     headline: row.headline,
+    domain: readDomain(row.interpreted),
+    callCount,
     activeMs: row.activeMs,
     activeSince: row.activeSince,
     pausedAt: row.pausedAt,

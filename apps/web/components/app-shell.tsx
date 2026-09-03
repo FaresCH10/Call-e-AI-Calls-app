@@ -2,7 +2,12 @@
 
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import type { SessionUser, TaskSummary } from '@dial/schemas';
+import {
+  groupTasksByDay,
+  taskSummaryLine,
+  type SessionUser,
+  type TaskSummary,
+} from '@dial/schemas';
 import {
   BrandMark,
   PlusIcon,
@@ -100,23 +105,33 @@ export function AppShell({
               Nothing yet
             </p>
           ) : (
-            recents.map((task) => (
-              <Link
-                key={task.id}
-                href={`/tasks/${task.id}`}
-                className="recent-item"
-                title={task.instruction}
-              >
-                <span
-                  className="recent-dot"
-                  data-live={LIVE_STATES.has(task.state) ? 'true' : 'false'}
-                />
-                <span
-                  style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                >
-                  {task.instruction}
-                </span>
-              </Link>
+            groupTasksByDay(recents).map((group) => (
+              <div key={group.label} className="recent-group">
+                {/*
+                  The day, once, instead of nothing. Twelve one-line rows all
+                  looked equally recent -- there was no way to tell this
+                  morning's task from last week's without opening it.
+                */}
+                <div className="recent-day">{group.label}</div>
+                {group.tasks.map((task) => (
+                  <Link
+                    key={task.id}
+                    href={`/tasks/${task.id}`}
+                    className="recent-item"
+                    title={`${task.instruction} — ${taskSummaryLine(task)}`}
+                  >
+                    <span
+                      className="recent-dot"
+                      data-live={LIVE_STATES.has(task.state) ? 'true' : 'false'}
+                    />
+                    <span
+                      style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                    >
+                      {task.instruction}
+                    </span>
+                  </Link>
+                ))}
+              </div>
             ))
           )}
         </div>

@@ -20,6 +20,7 @@ import type {
   CreateRunRequest,
   UsageResponse,
   TaskSuggestionsResponse,
+  ImportBusinessContactsResponse,
 } from '@dial/schemas';
 
 /**
@@ -371,6 +372,22 @@ export class DialApiClient {
     return this.request(
       `/api/businesses/${encodeURIComponent(businessId)}/contacts/${encodeURIComponent(contactId)}`,
       { method: 'DELETE' },
+    );
+  }
+
+  /**
+   * Uploads a customer list to ONE business.
+   *
+   * These never touch the user's own contacts: different table, different
+   * screen. Pass `dryRun` to see what a file contains before writing it.
+   */
+  importBusinessContacts(
+    businessId: string,
+    input: { filename: string; contentBase64: string; dryRun?: boolean },
+  ): Promise<ImportBusinessContactsResponse> {
+    return this.request(
+      `/api/businesses/${encodeURIComponent(businessId)}/contacts/import`,
+      { method: 'POST', body: JSON.stringify(input) },
     );
   }
 

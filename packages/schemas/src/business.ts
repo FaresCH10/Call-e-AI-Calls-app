@@ -576,6 +576,97 @@ export const createRunRequestSchema = z.object({
 });
 export type CreateRunRequest = z.infer<typeof createRunRequestSchema>;
 
+/* -------------------------------------------------- importing contacts */
+
+/**
+ * A customer list uploaded as a spreadsheet.
+ *
+ * The file arrives base64 encoded in JSON rather than as multipart: it saves a
+ * plugin and a second code path, and a contact list that would not fit here is
+ * one that should be split anyway.
+ *
+ * Deliberately scoped to ONE business. These are a business's customers, not
+ * the user's own address book -- the two are separate tables, separate
+ * screens, and separate consent. Nothing imported here is ever visible under
+ * Contacts.
+ */
+export const importBusinessContactsRequestSchema = z.object({
+  filename: z.string().trim().min(1).max(255),
+  /** The file itself. ~5 MB decoded, which is far more than a contact list. */
+  contentBase64: z.string().min(1).max(7_000_000),
+  /**
+   * Read the file and report what it contains without writing anything.
+   * The preview is what makes this safe to try on a real customer list.
+   */
+  dryRun: z.boolean().default(false),
+});
+export type ImportBusinessContactsRequest = z.infer<typeof importBusinessContactsRequestSchema>;
+
+/** Why one row could not be imported, in the words shown next to it. */
+export const importRowIssueSchema = z.object({
+  /** 1-based, counting the header, so it matches what the spreadsheet shows. */
+  row: z.number().int().positive(),
+  name: z.string().nullable(),
+  phone: z.string().nullable(),
+  reason: z.string(),
+});
+export type ImportRowIssue = z.infer<typeof importRowIssueSchema>;
+
+export const importBusinessContactsResponseSchema = z.object({
+  /** Which spreadsheet column each field was read from, so a mismatch is visible. */
+  columns: z.object({
+    name: z.string().nullable(),
+    phone: z.string().nullable(),
+    email: z.string().nullable(),
+    reference: z.string().nullable(),
+  }),
+  /** Rows with a usable name and number. Written unless this was a dry run. */
+  imported: z.number().int().nonnegative(),
+  /** Already on the list, matched by number. Left exactly as they were. */
+  duplicates: z.number().int().nonnegative(),
+  /** Everything that could not be used, and why. */
+  skipped: z.array(importRowIssueSchema),
+  /** Total data rows the file contained, header excluded. */
+  totalRows: z.number().int().nonnegative(),
+  /** True when nothing was written. */
+  dryRun: z.boolean(),
+  /** The first few contacts as they would be saved, for the preview. */
+  sample: z.array(z.object({ name: z.string(), phoneE164: z.string() })).default([]),
+});
+export type ImportBusinessContactsResponse = z.infer<typeof importBusinessContactsResponseSchema>;
+
+/**
+ * Which column holds what.
+ *
+ * Matched on the header text people actually use, in the order most likely to
+ * be right: an exact match beats a partial one, so a sheet with both "Name"
+ * and "Company Name" picks the plain one.
+ */
+const COLUMN_ALIASES = {
+  name: ['name', 'full name', 'customer', 'customer name', 'contact', 'contact name', 'client'],
+  phone: ['phone', 'phone number', 'mobile', 'mobile number', 'telephone', 'tel', 'number', 'cell'],
+  email: ['email', 'e-mail', 'email address', 'mail'],
+  reference: ['reference', 'ref', 'id', 'customer id', 'account', 'account number'],
+} as const;
+
+export type ImportColumnMap = { [K in keyof typeof COLUMN_ALIASES]: number | null };
+
+export function mapImportColumns(headers: string[]): ImportColumnMap {
+  const normalized = headers.map((h) => h.trim().toLowerCase());
+  const pick = (aliases: readonly string[]): number | null => {
+    const exact = normalized.findIndex((h) => aliases.includes(h));
+    if (exact >= 0) return exact;
+    const partial = normalized.findIndex((h) => h && aliases.some((a) => h.includes(a)));
+    return partial >= 0 ? partial : null;
+  };
+  return {
+    name: pick(COLUMN_ALIASES.name),
+    phone: pick(COLUMN_ALIASES.phone),
+    email: pick(COLUMN_ALIASES.email),
+    reference: pick(COLUMN_ALIASES.reference),
+  };
+}
+
 export const RUN_STATES = [
   'queued',
   'running',

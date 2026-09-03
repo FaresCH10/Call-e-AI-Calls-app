@@ -86,6 +86,16 @@ export const taskSummarySchema = z.object({
   stateLabel: z.string(),
   headline: z.string().nullable(),
   /**
+   * The kind of business this was about, e.g. 'phone_repair'.
+   *
+   * Free-form by design (see DialTask.domain), so it names an icon rather than
+   * selecting one from a closed set -- an unknown domain gets a neutral mark
+   * instead of no row.
+   */
+  domain: z.string().nullable().default(null),
+  /** How many businesses Dial actually dialled. Never counts planned rows. */
+  callCount: z.number().int().nonnegative().default(0),
+  /**
    * How long Dial has worked on this, banked so far. Excludes time spent
    * waiting on the user, and survives a task being restarted.
    */
@@ -98,6 +108,75 @@ export const taskSummarySchema = z.object({
   updatedAt: z.string(),
 });
 export type TaskSummary = z.infer<typeof taskSummarySchema>;
+
+/* ------------------------------------------------- grouping by day ----- */
+
+/**
+ * The heading a task belongs under in a history list.
+ *
+ * Compared in the reader's own timezone, not UTC: a task created at 01:00
+ * local is "Today" to the person who created it, whatever the server thinks.
+ * A flat list of forty tasks is a wall; the same list under Today / Yesterday
+ * / a date is something a person can scan.
+ */
+export function taskDayLabel(iso: string, now: Date = new Date()): string {
+  const when = new Date(iso);
+  if (!Number.isFinite(when.getTime())) return 'Earlier';
+
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((startOfDay(now) - startOfDay(when)) / 86_400_000);
+
+  if (days <= 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days < 7) {
+    return when.toLocaleDateString(undefined, { weekday: 'long' });
+  }
+  if (when.getFullYear() === now.getFullYear()) {
+    return when.toLocaleDateString(undefined, { day: 'numeric', month: 'long' });
+  }
+  return when.toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+export interface TaskDayGroup<T> {
+  label: string;
+  tasks: T[];
+}
+
+/**
+ * Splits an already-sorted list into day groups, preserving its order.
+ *
+ * Deliberately does not sort: the server returns newest first, and re-sorting
+ * here would silently disagree with the cursor the "load more" link uses.
+ */
+export function groupTasksByDay<T extends { createdAt: string }>(
+  tasks: T[],
+  now: Date = new Date(),
+): Array<TaskDayGroup<T>> {
+  const groups: Array<TaskDayGroup<T>> = [];
+  for (const task of tasks) {
+    const label = taskDayLabel(task.createdAt, now);
+    const last = groups[groups.length - 1];
+    if (last && last.label === label) last.tasks.push(task);
+    else groups.push({ label, tasks: [task] });
+  }
+  return groups;
+}
+
+/**
+ * The one-line summary under a task's name: what happened, and how much of it.
+ *
+ * "6 calls" is a count of phones actually rung, so it stays honest about a
+ * task that found nobody to call.
+ */
+export function taskSummaryLine(task: {
+  stateLabel: string;
+  callCount: number;
+  pausedAt?: string | null;
+}): string {
+  const state = task.pausedAt ? 'Paused' : task.stateLabel;
+  if (task.callCount === 0) return state;
+  return `${state} · ${task.callCount} call${task.callCount === 1 ? '' : 's'}`;
+}
 
 export const taskDetailSchema = taskSummarySchema.extend({
   interpreted: dialTaskSchema.nullable(),

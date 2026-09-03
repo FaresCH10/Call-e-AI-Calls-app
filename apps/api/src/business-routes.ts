@@ -18,11 +18,19 @@ import {
   createBusinessContactRequestSchema,
   updateBusinessContactRequestSchema,
   createRunRequestSchema,
+  importBusinessContactsRequestSchema,
+  mapImportColumns,
   getBusinessTemplate,
   listCreatableTemplates,
   type BusinessRunSummaryDto,
 } from '@dial/schemas';
-import { isValidE164, isBlockedNumber, normalizePhone } from '@dial/domain';
+import {
+  isValidE164,
+  isBlockedNumber,
+  normalizePhone,
+  parseSpreadsheet,
+  SpreadsheetError,
+} from '@dial/domain';
 import { audit, newId } from '@dial/orchestrator';
 import type { OrchestratorContext } from '@dial/orchestrator';
 import {
@@ -386,6 +394,154 @@ export async function registerBusinessRoutes(app: FastifyInstance, deps: Busines
     await audit(db, user.id, null, 'business_contact_saved', { businessId: business.id, contactId: saved!.id });
     return toContactDto(saved!);
   });
+
+  /*
+   * A customer list, from a spreadsheet.
+   *
+   * These are a BUSINESS's customers. They are written to business_contacts
+   * and nowhere near the user's own address book -- separate table, separate
+   * screen, separate consent. Nothing here can end up under Contacts.
+   *
+   * The body is bigger than the app default because it carries a file; five
+   * megabytes of base64 is roughly seven of JSON, and the parser refuses
+   * anything past that anyway.
+   */
+  app.post(
+    '/api/businesses/:businessId/contacts/import',
+    { bodyLimit: 8 * 1024 * 1024 },
+    async (request, reply) => {
+      const user = requireUser(request, reply);
+      if (!user) return;
+      const business = await requireBusiness(request, reply, user.id);
+      if (!business) return;
+
+      const parsed = importBusinessContactsRequestSchema.safeParse(request.body);
+      if (!parsed.success) return fail(reply, 400, 'invalid_request', firstIssue(parsed.error));
+      const { filename, contentBase64, dryRun } = parsed.data;
+
+      let table;
+      try {
+        table = parseSpreadsheet(Buffer.from(contentBase64, 'base64'), filename);
+      } catch (error) {
+        // The parser's messages are already written for a person -- "That is
+        // the older .xls format", not a stack trace.
+        const message =
+          error instanceof SpreadsheetError
+            ? error.message
+            : 'Dial could not read that file. Try saving it as .xlsx or .csv.';
+        return fail(reply, 400, 'unreadable_file', message);
+      }
+
+      const columns = mapImportColumns(table.headers);
+      const headerName = (index: number | null) =>
+        index === null ? null : (table.headers[index] ?? null);
+
+      if (columns.name === null || columns.phone === null) {
+        return fail(
+          reply,
+          400,
+          'missing_columns',
+          'Dial could not find a name column and a phone column. Give the first row headings like "Name" and "Phone".',
+        );
+      }
+
+      // Matched on the number, which is the only thing that identifies a
+      // person here: two customers can share a name.
+      const existing = await db
+        .select({ phoneE164: businessContacts.phoneE164 })
+        .from(businessContacts)
+        .where(eq(businessContacts.businessId, business.id));
+      const known = new Set(existing.map((row) => row.phoneE164));
+
+      const skipped: Array<{ row: number; name: string | null; phone: string | null; reason: string }> = [];
+      const toInsert: Array<{ name: string; phoneE164: string; email: string | null; reference: string | null }> = [];
+      // A list that repeats a number inside itself must not insert it twice.
+      const seenInFile = new Set<string>();
+      let duplicates = 0;
+
+      table.rows.forEach((row, index) => {
+        // +2: one for the header, one because spreadsheets count from 1. This
+        // is the number the user sees beside the row in Excel.
+        const rowNumber = index + 2;
+        const rawName = (row[columns.name!] ?? '').trim();
+        const rawPhone = (row[columns.phone!] ?? '').trim();
+
+        if (!rawName && !rawPhone) return;
+        if (!rawName) {
+          skipped.push({ row: rowNumber, name: null, phone: rawPhone, reason: 'No name' });
+          return;
+        }
+        if (!rawPhone) {
+          skipped.push({ row: rowNumber, name: rawName, phone: null, reason: 'No phone number' });
+          return;
+        }
+
+        const normalized = normalizePhone(rawPhone, business.country);
+        if (!normalized || !isValidE164(normalized.e164)) {
+          skipped.push({
+            row: rowNumber,
+            name: rawName,
+            phone: rawPhone,
+            reason: business.country
+              ? 'Not a phone number Dial can read'
+              : 'Not a phone number Dial can read — set this business’s country to read local numbers',
+          });
+          return;
+        }
+        if (isBlockedNumber(normalized.e164)) {
+          skipped.push({ row: rowNumber, name: rawName, phone: rawPhone, reason: 'Dial will not call that number' });
+          return;
+        }
+        if (known.has(normalized.e164) || seenInFile.has(normalized.e164)) {
+          duplicates += 1;
+          return;
+        }
+
+        seenInFile.add(normalized.e164);
+        toInsert.push({
+          name: rawName.slice(0, 120),
+          phoneE164: normalized.e164,
+          email: columns.email === null ? null : (row[columns.email] ?? '').trim() || null,
+          reference: columns.reference === null ? null : (row[columns.reference] ?? '').trim() || null,
+        });
+      });
+
+      if (!dryRun && toInsert.length > 0) {
+        await db.insert(businessContacts).values(
+          toInsert.map((contact) => ({
+            id: newContactId(),
+            businessId: business.id,
+            name: contact.name,
+            phoneE164: contact.phoneE164,
+            email: contact.email,
+            externalReference: contact.reference,
+          })),
+        );
+        await audit(db, user.id, null, 'business_contacts_imported', {
+          businessId: business.id,
+          imported: toInsert.length,
+          skipped: skipped.length,
+          duplicates,
+        });
+      }
+
+      return {
+        columns: {
+          name: headerName(columns.name),
+          phone: headerName(columns.phone),
+          email: headerName(columns.email),
+          reference: headerName(columns.reference),
+        },
+        imported: dryRun ? 0 : toInsert.length,
+        duplicates,
+        // Enough to see the pattern of what went wrong without a wall of rows.
+        skipped: skipped.slice(0, 50),
+        totalRows: table.rows.length,
+        dryRun,
+        sample: toInsert.slice(0, 5).map((c) => ({ name: c.name, phoneE164: c.phoneE164 })),
+      };
+    },
+  );
 
   app.patch('/api/businesses/:businessId/contacts/:contactId', async (request, reply) => {
     const user = requireUser(request, reply);

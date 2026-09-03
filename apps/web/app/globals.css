@@ -2160,3 +2160,278 @@ label.business-result-row {
   color: var(--color-text-secondary);
   font-weight: 500;
 }
+
+/* --------------------------------------------------- importing contacts */
+
+.import-preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  margin-top: var(--space-lg);
+  padding-top: var(--space-lg);
+  border-top: 1px solid var(--color-border);
+}
+
+.import-stat-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xl);
+}
+
+.import-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.import-stat-number {
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  line-height: 1;
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Colour is a second signal here, never the only one -- each number is
+   labelled in words beneath it. */
+.import-stat[data-tone='good'] .import-stat-number {
+  color: var(--color-success);
+}
+
+.import-stat[data-tone='warn'] .import-stat-number {
+  color: var(--color-warning);
+}
+
+.import-stat-label {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+/* A few real rows, as they would be saved. Reading two of them is what
+   catches a file of suppliers pretending to be a file of customers. */
+.import-sample {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.import-sample li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: 10px var(--space-md);
+  border-top: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+}
+
+.import-sample li:first-child {
+  border-top: none;
+}
+
+.import-sample-phone {
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.import-skipped {
+  list-style: none;
+  margin: var(--space-md) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.import-skipped li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.import-skipped-row {
+  flex: none;
+  min-width: 4.5rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.import-skipped-reason {
+  margin-left: auto;
+  color: var(--color-warning);
+}
+
+@media (max-width: 640px) {
+  .import-stat-row {
+    gap: var(--space-lg);
+  }
+
+  .import-skipped-reason {
+    margin-left: 0;
+    width: 100%;
+  }
+}
+
+/* ------------------------------------------------------- task history */
+
+.history-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+/*
+ * The day, as a heading rather than a repeated timestamp on every row. Sticky
+ * so it stays legible while scrolling a long list -- knowing which day you are
+ * looking at is the whole point of the grouping.
+ */
+.history-day {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-md);
+  margin: 0;
+  padding: var(--space-sm) 0;
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.history-day-count {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.history-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-lg);
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast) var(--easing),
+    box-shadow var(--motion-fast) var(--easing);
+}
+
+.history-row:hover {
+  border-color: var(--color-brand-border);
+  box-shadow: var(--shadow-md);
+}
+
+.history-icon {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-md);
+  display: grid;
+  place-items: center;
+  background: var(--color-brand-soft);
+  color: var(--color-brand);
+  border: 1px solid var(--color-brand-border);
+}
+
+.history-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.history-name {
+  color: var(--color-text-primary);
+  font-size: var(--text-md);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.history-meta {
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.history-headline {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.history-side {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.history-time {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 560px) {
+  /* The pill and the time move under the name rather than squeezing it. */
+  .history-row {
+    flex-wrap: wrap;
+    gap: var(--space-md);
+  }
+
+  .history-side {
+    flex-direction: row;
+    align-items: center;
+    width: 100%;
+    padding-left: calc(38px + var(--space-lg));
+  }
+
+  .history-time {
+    margin-left: auto;
+  }
+}
+
+/* Day headings inside the sidebar's recents. */
+.recent-group + .recent-group {
+  margin-top: var(--space-md);
+}
+
+.recent-day {
+  padding: 4px 12px 4px 34px;
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
