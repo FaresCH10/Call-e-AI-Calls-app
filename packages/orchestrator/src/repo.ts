@@ -18,6 +18,7 @@ import {
 import {
   TASK_STATE_LABELS,
   isWorkingTaskState,
+  dialTaskSchema,
   userPolicySchema,
   DEFAULT_USER_POLICY,
   type TaskState,
@@ -27,10 +28,12 @@ import {
   type CallDisposition,
   type UserPolicy,
   type TaskDetail,
+  type TaskMission,
   type TaskSummary,
   type UserSettings,
 } from '@dial/schemas';
 import { maskPhone } from '@dial/domain';
+import { config } from '@dial/config';
 import type { OrchestratorContext } from './context.js';
 
 export function newId(prefix: string): string {
@@ -751,6 +754,126 @@ export function toTaskSummary(
   };
 }
 
+
+/**
+ * What Dial is aiming for on this task, and how far along it is.
+ *
+ * The numbers here are read back from the same rows `maybeAdvance` decides on,
+ * and the target is worked out the same way it is there -- a request that names
+ * its own number ("ring five places") wins over the configured default. If the
+ * two ever disagreed, the panel would narrate a goal the engine was not
+ * actually pursuing, which is worse than showing nothing.
+ */
+function buildMission(
+  row: typeof tasks.$inferSelect,
+  callRecords: TaskDetail['calls'],
+  candidates: TaskDetail['candidates'],
+): TaskMission {
+  const limits = config().limits;
+  const interpreted = dialTaskSchema.safeParse(row.interpreted);
+  const evidenceTarget =
+    (interpreted.success ? interpreted.data.constraints.candidateLimit : null) ??
+    limits.comparableTarget;
+
+  const answered = callRecords.filter((c) => c.disposition === 'answered_useful');
+  // Dialled, not planned. A row without a provider call id is a business Dial
+  // intends to ring, and counting it would claim a call that never happened.
+  const callsPlaced = callRecords.filter((c) => c.providerCallId).length;
+
+  /*
+   * The same filter `selectCallTargets` and `tryAnotherBusiness` both apply.
+   * Kept in step with them deliberately: this number is the one that actually
+   * decides how far a task gets, so if it drifted from theirs the panel would
+   * explain a limit the engine was not using.
+   */
+  const callableFound = candidates.filter(
+    (c) => !c.excludedReason && c.candidate.phoneE164,
+  ).length;
+
+  return {
+    evidenceTarget,
+    evidenceSoFar: answered.length,
+    callsPlaced,
+    callBudget: limits.maxCallsUntilResult,
+    candidatesFound: candidates.length,
+    callableFound,
+    stopReason: describeStop({
+      state: row.state,
+      useful: answered.length,
+      target: evidenceTarget,
+      placed: callsPlaced,
+      budget: limits.maxCallsUntilResult,
+      callable: callableFound,
+      found: candidates.length,
+    }),
+  };
+}
+
+/**
+ * Why Dial stopped, in the words a person would use.
+ *
+ * "Completed" covers both "found what you asked for" and "rang everyone and
+ * came up short", and those deserve different sentences. Null while the task is
+ * still running, because a running task has not stopped for any reason yet.
+ */
+export function describeStop(input: {
+  state: string;
+  useful: number;
+  target: number;
+  placed: number;
+  budget: number;
+  /** Businesses Dial could actually ring: listed number, open, not excluded. */
+  callable: number;
+  /** Businesses discovery turned up in total. */
+  found: number;
+}): string | null {
+  const { state, useful, target, placed, budget, callable, found } = input;
+
+  if (!['completed', 'partially_completed', 'failed', 'canceled'].includes(state)) return null;
+  if (state === 'canceled') return 'You stopped this task.';
+  if (useful >= target) {
+    return `Dial had ${useful} comparable ${useful === 1 ? 'answer' : 'answers'}, which was enough to compare.`;
+  }
+  /*
+   * Nothing was dialled at all, which is a different story from a run of bad
+   * calls and has to be told differently.
+   *
+   * This branch is here because the first version did not have it, and a task
+   * that never placed a call rendered "No business Dial reached could answer
+   * this one" directly above "Businesses called: 0". Dial had not reached
+   * anybody, so the sentence was false -- and it blamed the businesses for a
+   * failure that happened on our side, before a phone was ever picked up.
+   */
+  if (placed === 0) {
+    return 'Dial did not get as far as calling anyone.';
+  }
+  if (placed >= budget) {
+    return `Dial reached its limit of ${budget} calls for one task before it could compare ${target}.`;
+  }
+  /*
+   * Out of businesses rather than out of budget, which is the case the panel
+   * used to hide completely.
+   *
+   * A search can return twenty shops and leave two that Dial may ring: the
+   * rest have no listed number, or are closed at this moment, and both are
+   * filtered out before the call limits are consulted. The old wording made
+   * that look like a choice -- "2 of 10 max" next to "20 found" reads as Dial
+   * giving up early with eighteen to spare. It had nobody left to phone.
+   */
+  if (placed >= callable && found > callable) {
+    const skipped = found - callable;
+    return (
+      `Dial called every business it could: ${callable} of the ${found} it found ` +
+      `${callable === 1 ? 'was' : 'were'} reachable, and the other ${skipped} ` +
+      `had no listed number or were closed at the time.`
+    );
+  }
+  if (useful === 0) {
+    return `None of the ${placed} ${placed === 1 ? 'business' : 'businesses'} Dial called could answer this one.`;
+  }
+  return `Dial ran out of businesses to try after ${useful} ${useful === 1 ? 'answer' : 'answers'}.`;
+}
+
 export async function toTaskDetail(db: Db, row: typeof tasks.$inferSelect): Promise<TaskDetail> {
   const [candidates, callRecords, events, pending] = await Promise.all([
     listCandidates(db, row.id),
@@ -788,6 +911,7 @@ export async function toTaskDetail(db: Db, row: typeof tasks.$inferSelect): Prom
     interpreted: (row.interpreted as TaskDetail['interpreted']) ?? null,
     candidates,
     calls: callRecords,
+    mission: buildMission(row, callRecords, candidates),
     result: (row.result as TaskDetail['result']) ?? null,
     events: events.map((e) => ({
       id: e.id,

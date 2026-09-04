@@ -40,7 +40,13 @@ import {
   describeLanguage,
   englishNameOf,
 } from '@dial/domain';
-import { buildCallBrief, callIdempotencyKey, ProviderError, isTerminal } from '@dial/calle';
+import {
+  buildCallBrief,
+  callIdempotencyKey,
+  unresolvedFields,
+  ProviderError,
+  isTerminal,
+} from '@dial/calle';
 import {
   isTooCoarseToSearch,
   isCountryLevel,
@@ -1174,6 +1180,23 @@ export async function handleDispatchWave(
   const mayCommit =
     dialTask.requestedSideEffect === 'reservation' || dialTask.requestedSideEffect === 'appointment';
 
+  /*
+   * What earlier calls on this task could not establish.
+   *
+   * Read once per wave rather than per call: every call in a wave goes out at
+   * the same moment, so none of them can learn from the others, and querying
+   * again inside the loop would return the same rows at extra cost. By the
+   * next wave the results are in and the gap has narrowed.
+   */
+  const priorRows = await ctx.db
+    .select({ structuredResult: calls.structuredResult })
+    .from(calls)
+    .where(and(eq(calls.taskId, task.id), eq(calls.disposition, 'answered_useful')));
+  const unresolved = unresolvedFields(
+    family,
+    priorRows.map((row) => (row.structuredResult as Record<string, unknown> | null) ?? null),
+  );
+
   for (const call of pending) {
     const candidateRows = await ctx.db
       .select()
@@ -1191,6 +1214,7 @@ export async function handleDispatchWave(
       mayCommit,
       userFacts: {},
       userDisplayName: null,
+      unresolved,
     });
 
     try {

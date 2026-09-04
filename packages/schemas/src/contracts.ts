@@ -178,6 +178,59 @@ export function taskSummaryLine(task: {
   return `${state} · ${task.callCount} call${task.callCount === 1 ? '' : 's'}`;
 }
 
+/**
+ * What Dial is trying to achieve, and how close it is.
+ *
+ * Dial already decides when to stop by goal rather than by count -- it keeps
+ * ringing businesses until it has enough comparable answers, or until the
+ * budget runs out. None of that was visible: the user saw calls happening and
+ * then a result, with no way to tell whether Dial had finished or given up.
+ *
+ * Every number here is counted from rows that exist. There is no estimate and
+ * no projection: `evidenceSoFar` is answers actually received, `callsPlaced`
+ * is phones actually rung.
+ */
+export const taskMissionSchema = z.object({
+  /** Comparable answers Dial is aiming for before it will recommend one. */
+  evidenceTarget: z.number().int().positive(),
+  /** How many it has. Counted from calls that produced a usable answer. */
+  evidenceSoFar: z.number().int().nonnegative(),
+  /** Businesses dialled so far. Never counts a planned call. */
+  callsPlaced: z.number().int().nonnegative(),
+  /** The most Dial may ring for this task. */
+  callBudget: z.number().int().positive(),
+  /** Businesses discovery turned up. */
+  candidatesFound: z.number().int().nonnegative(),
+  /**
+   * How many of those Dial could actually ring.
+   *
+   * This is the number that governs how far a task gets, and it is usually
+   * much smaller than `candidatesFound`: a business with no listed number, or
+   * one that is closed at this moment, is excluded before the call limits are
+   * ever consulted. Without it the panel reads as though Dial chose to stop
+   * after two calls with eighteen businesses to spare, when in fact it had
+   * run out of anyone to phone.
+   */
+  callableFound: z.number().int().nonnegative().default(0),
+  /*
+   * There is deliberately no "current best" here.
+   *
+   * A price is only comparable through its domain's own price field, and the
+   * ranking that picks a winner weighs timing and confidence before cost. A
+   * second, simpler "best so far" computed at read time would eventually
+   * disagree with the recommendation on the same screen, and a tool that
+   * contradicts itself is worse than one that stays quiet until it knows.
+   */
+  /**
+   * Why Dial stopped, once it has. Null while it is still working.
+   *
+   * Said plainly, because "reached the evidence target" and "ran out of
+   * businesses" are very different outcomes wearing the same "Completed" pill.
+   */
+  stopReason: z.string().nullable().default(null),
+});
+export type TaskMission = z.infer<typeof taskMissionSchema>;
+
 export const taskDetailSchema = taskSummarySchema.extend({
   interpreted: dialTaskSchema.nullable(),
   candidates: z.array(rankedCandidateSchema).default([]),
@@ -185,6 +238,8 @@ export const taskDetailSchema = taskSummarySchema.extend({
   result: taskResultSchema.nullable(),
   events: z.array(taskEventSchema).default([]),
   pendingAuthorization: authorizationRequestSchema.nullable(),
+  /** The goal, and how close Dial is to it. */
+  mission: taskMissionSchema,
   /**
    * The number the user named in the request, when they named one. Present
    * means Dial searched for nothing, and the UI can offer to keep it.

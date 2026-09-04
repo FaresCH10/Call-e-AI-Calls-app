@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { getCallFamily, DEFAULT_USER_POLICY, type DialTask } from '@dial/schemas';
-import { buildCallBrief } from '../planner.js';
+import { buildCallBrief, unresolvedFields, type CallPlanInput } from '../planner.js';
 
 /**
  * The brief is the only thing standing between Dial and a bad phone call.
@@ -43,10 +43,13 @@ const TASK: DialTask = {
   isEmergency: false,
 };
 
-function brief(over: Partial<DialTask> = {}): string {
+function brief(
+  over: Partial<DialTask> = {},
+  extra: Partial<Pick<CallPlanInput, 'unresolved' | 'family'>> = {},
+): string {
   return buildCallBrief({
     task: { ...TASK, ...over },
-    family: getCallFamily('general_inquiry'),
+    family: extra.family ?? getCallFamily('general_inquiry'),
     candidate: {
       id: 'c1',
       name: "Bill's",
@@ -70,6 +73,7 @@ function brief(over: Partial<DialTask> = {}): string {
     mayCommit: false,
     userFacts: {},
     userDisplayName: null,
+    unresolved: extra.unresolved,
   });
 }
 
@@ -188,5 +192,77 @@ describe('what the brief has always had to say', () => {
   it('carries the purpose in the user’s own words when there is one', () => {
     const text = brief({ callPurpose: 'check whether there is ice cream' });
     expect(text).toMatch(/The caller asked specifically: check whether there is ice cream/);
+  });
+});
+
+/**
+ * Making each call smarter than the last one.
+ *
+ * Dial rings several businesses with the same checklist. If four of them gave a
+ * price but none would say anything about a warranty, the fifth call should
+ * lead with the warranty rather than collecting a fifth price nobody needs.
+ */
+describe('unresolvedFields', () => {
+  const repair = getCallFamily('repair_quote');
+
+  it('returns nothing on the first call of a task', () => {
+    // No prior results means no evidence of a gap. Flagging every field here
+    // would put the whole checklist under "ASK THESE FIRST", prioritising
+    // nothing.
+    expect(unresolvedFields(repair, [])).toEqual([]);
+  });
+
+  it('treats "unknown", 0 and empty string as unanswered', () => {
+    const missing = unresolvedFields(repair, [
+      { can_repair: 'yes', quoted_price: 0, warranty: '', parts_quality: 'unknown' },
+    ]);
+    expect(missing.some((m) => /total price quoted/i.test(m))).toBe(true);
+    expect(missing.some((m) => /warranty/i.test(m))).toBe(true);
+  });
+
+  it('drops a field as soon as any one business has answered it', () => {
+    // The second garage would not quote, but the first did, so the price is no
+    // longer the gap in what Dial knows.
+    const missing = unresolvedFields(repair, [
+      { can_repair: 'yes', quoted_price: 90, warranty: 'unknown' },
+      { can_repair: 'yes', quoted_price: 0, warranty: 'unknown' },
+    ]);
+    expect(missing.some((m) => /total price quoted/i.test(m))).toBe(false);
+    expect(missing.some((m) => /warranty/i.test(m))).toBe(true);
+  });
+
+  it('never chases the bookkeeping fields', () => {
+    const missing = unresolvedFields(repair, [{ can_repair: 'yes' }]);
+    expect(missing.join(' ')).not.toMatch(/evidence|confidence|business name/i);
+  });
+
+  it('ignores calls that produced no structured result at all', () => {
+    expect(unresolvedFields(repair, [null, null])).toEqual([]);
+  });
+});
+
+describe('the brief prioritises what is still missing', () => {
+  it('lists outstanding facts under a heading that orders the checklist', () => {
+    const text = brief({}, { unresolved: ['Warranty offered, as stated.'] });
+    expect(text).toContain('ASK THESE FIRST');
+    expect(text).toContain('Warranty offered, as stated.');
+  });
+
+  it('omits the section entirely when nothing is outstanding', () => {
+    expect(brief()).not.toContain('ASK THESE FIRST');
+  });
+
+  it('caps the priority list so a brief cannot flag everything', () => {
+    const text = brief({}, { unresolved: ['one', 'two', 'three', 'four', 'five', 'six'] });
+    for (const kept of ['- one', '- two', '- three', '- four']) expect(text).toContain(kept);
+    for (const dropped of ['- five', '- six']) expect(text).not.toContain(dropped);
+  });
+
+  it('still forbids open-ended follow-ups while allowing one to pin down a range', () => {
+    // Both rules have to survive together: the fix for the call that looped
+    // against a recording, and the new nudge that a range is not an answer.
+    const text = brief();
+    expect(text).toContain('Do not invent follow-up questions');
+    expect(text).toMatch(/ONE short follow-up/);
   });
 });

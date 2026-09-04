@@ -21,6 +21,19 @@ export interface CallPlanInput {
   /** Facts the user has explicitly supplied for this task. */
   userFacts: Record<string, string>;
   userDisplayName: string | null;
+  /**
+   * Fields earlier calls on this task failed to establish, in plain words.
+   *
+   * This is what makes each call smarter than the last one. The first call
+   * works from the family checklist alone; by the fourth, Dial knows that
+   * nobody has pinned down the warranty and says so, so the call spends its
+   * two attempts on the gap instead of re-confirming what three businesses
+   * have already answered.
+   *
+   * Empty on the first call of a task, and empty whenever the previous calls
+   * answered everything -- there is nothing to chase.
+   */
+  unresolved?: string[];
 }
 
 export function buildCallBrief(input: CallPlanInput): string {
@@ -63,6 +76,24 @@ export function buildCallBrief(input: CallPlanInput): string {
     for (const question of questions) lines.push(`- ${question}`);
   }
 
+  /*
+   * What earlier calls on this task could not establish.
+   *
+   * Placed directly under the checklist so it reads as a priority ordering of
+   * the same list rather than a second list of new topics -- the failure mode
+   * to avoid is the agent treating this as extra work and asking twice as many
+   * questions. Capped at four, because a brief that flags everything as a
+   * priority has flagged nothing.
+   */
+  const unresolved = (input.unresolved ?? []).slice(0, 4);
+  if (unresolved.length > 0) {
+    lines.push(``, `ASK THESE FIRST`);
+    lines.push(
+      `Other businesses have already been called about this. These are the only things still missing, so get them early in the call in case it ends abruptly:`,
+    );
+    for (const item of unresolved) lines.push(`- ${sanitizeExternalText(item, 120)}`);
+  }
+
   lines.push(``, `HOW TO ASK`);
   lines.push(`- One question at a time. Wait for the answer before asking the next.`);
   lines.push(
@@ -73,6 +104,23 @@ export function buildCallBrief(input: CallPlanInput): string {
   );
   lines.push(
     `- When you have everything you were asked to find out -- or they have declined to give it -- thank them and end the call. Do not invent follow-up questions.`,
+  );
+  /*
+   * The one follow-up that is allowed, and it is deliberately narrow.
+   *
+   * "Do not invent follow-up questions" above was written after a call that
+   * rephrased its way through fifteen exchanges against a recording, and that
+   * rule stays. But it also stopped the agent pinning down a half-answer: a
+   * business would say "somewhere around eighty, depends on the model" and the
+   * call would end with a price of unknown, when one more sentence would have
+   * had a number.
+   *
+   * So: a follow-up is permitted only when the reply was real but incomplete,
+   * and only once. Chasing a partial answer is not the failure mode -- asking
+   * an unwilling business the same thing a fourth time is.
+   */
+  lines.push(
+    `- One exception: if they give a real but incomplete answer -- a range, "it depends", "usually" -- you may ask ONE short follow-up to pin it down ("is that closer to eighty or a hundred?"). If the second answer is still vague, record what they actually said and move on.`,
   );
 
   const known = knownFacts(task, userFacts, userDisplayName);
@@ -279,4 +327,64 @@ function knownFacts(
     out.push(`Device: ${sanitizeExternalText(String(task.constraints.additional['device']), 80)}.`);
   }
   return out;
+}
+
+/* ------------------------------------------ what is still missing ------ */
+
+/** Fields every family carries for bookkeeping; never worth chasing on a call. */
+const NEVER_CHASE = new Set(['business_name', 'confidence', 'evidence_summary']);
+
+/**
+ * Reads a value as "the business actually told us this".
+ *
+ * The tri-state fields use the literal string "unknown", numbers use 0 for
+ * "none given", and a refused text field comes back empty. All three mean the
+ * same thing here: nobody has answered it yet.
+ */
+function isAnswered(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const v = value.trim().toLowerCase();
+    return v !== '' && v !== 'unknown' && v !== 'n/a';
+  }
+  return true;
+}
+
+/**
+ * Which of this family's fields no business has answered yet.
+ *
+ * This is what lets a task get smarter as it goes. Dial rings five garages
+ * with the same checklist; if four of them gave a price but none would say
+ * anything about a warranty, the fifth call should lead with the warranty
+ * rather than collecting a fifth price nobody needed.
+ *
+ * Deliberately keyed on "has *any* call answered it", not "did the last call
+ * answer it" -- one business's answer about its own warranty does not tell us
+ * about another's, but it does mean the question is no longer the gap in what
+ * Dial knows. Fields are returned in schema order, which puts the load-bearing
+ * ones (can they do it, what does it cost) before the details.
+ */
+export function unresolvedFields(
+  family: CallFamily,
+  priorResults: Array<Record<string, unknown> | null>,
+): string[] {
+  // Nothing to learn from on the first call of a task: the checklist stands
+  // on its own and flagging every field as "still missing" would be noise.
+  const results = priorResults.filter((r): r is Record<string, unknown> => Boolean(r));
+  if (results.length === 0) return [];
+
+  const schema = family.resultSchema as { properties?: Record<string, { description?: string }> };
+  const properties = schema.properties ?? {};
+
+  const missing: string[] = [];
+  for (const [field, spec] of Object.entries(properties)) {
+    if (NEVER_CHASE.has(field)) continue;
+    if (results.some((result) => isAnswered(result[field]))) continue;
+    // The schema's own description is already a plain-English question about
+    // the field; the bare field name is the fallback for the ones that have
+    // none, and reads acceptably once the underscores are gone.
+    missing.push(spec.description?.trim() || field.replace(/_/g, ' '));
+  }
+  return missing;
 }

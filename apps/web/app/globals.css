@@ -2435,3 +2435,107 @@ label.business-result-row {
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
+
+/* ------------------------------------------------ mission panel ------- */
+
+/*
+ * The goal, and how close Dial is to it.
+ *
+ * Deliberately quieter than the result card below it: this is context for the
+ * answer, not the answer. It uses the same surface and label treatment as every
+ * other card so it reads as one more section rather than a dashboard bolted on.
+ */
+.mission-goal {
+  margin: 0 0 14px;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--color-text);
+}
+
+/*
+ * Pips rather than a continuous bar: the target is a small whole number of
+ * phone calls, and a smooth 60%-full bar would imply a precision that "3 of 5
+ * businesses answered" does not have.
+ */
+.mission-track {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.mission-pip {
+  flex: 1;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--color-surface-muted);
+  border: 1px solid var(--color-border);
+  transition: background-color 200ms ease, border-color 200ms ease;
+}
+
+.mission-pip[data-filled='true'] {
+  background: var(--color-brand);
+  border-color: var(--color-brand);
+}
+
+.mission-count {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.mission-count strong {
+  color: var(--color-text);
+  font-size: 15px;
+}
+
+.mission-sep {
+  margin: 0 6px;
+  opacity: 0.5;
+}
+
+.mission-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0 0 14px;
+  padding: 14px 0 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.mission-stats dt {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  margin-bottom: 4px;
+}
+
+.mission-stats dd {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.mission-of {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--color-text-secondary);
+}
+
+.mission-stop {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+/* Still running: the same sentence, but visibly provisional. */
+.mission-stop[data-live='true'] {
+  font-style: italic;
+  opacity: 0.85;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mission-pip {
+    transition: none;
+  }
+}

@@ -19,6 +19,7 @@ import {
 import { api, ApiError } from '../../lib/api';
 import { colors, spacing, text, toneFor, LIVE_STATES } from '../../lib/theme';
 import { Card, Pill, Button, SectionLabel, Notice } from '../../components/ui';
+import { MissionCard } from '../../components/mission';
 import { ClockIcon } from '../../components/icons';
 
 /**
@@ -241,6 +242,15 @@ export default function TaskScreen() {
 
       {task.state === 'needs_user_input' && task.clarificationQuestion ? (
         <Notice tone="warning">{task.clarificationQuestion}</Notice>
+      ) : null}
+
+      {/*
+        Shown once Dial has actually rung somebody, or once it has stopped.
+        Before that there is no progress to report and the card would be a row
+        of empty pips claiming a goal Dial has not started on.
+      */}
+      {task.mission.callsPlaced > 0 || task.mission.stopReason ? (
+        <MissionCard mission={task.mission} />
       ) : null}
 
       {task.pendingAuthorization ? (

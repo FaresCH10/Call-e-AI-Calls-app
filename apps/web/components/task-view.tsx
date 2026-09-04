@@ -8,6 +8,7 @@ import {
   type TaskDetail,
   type ComparableOutcome,
 } from '@dial/schemas';
+import { MissionPanel } from './mission-panel';
 import { TaskTimer } from './task-timer';
 import { proxied, ApiError } from '@/lib/api';
 import { CheckIcon, PhoneIcon, MapPinIcon } from './icons';
@@ -320,6 +321,15 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
             </div>
           </form>
         </section>
+      ) : null}
+
+      {/*
+        Shown once Dial has actually rung somebody, or once it has stopped.
+        Before that there is no progress to report and the panel would just be
+        a row of empty pips claiming a goal Dial has not started on.
+      */}
+      {task.mission.callsPlaced > 0 || task.mission.stopReason ? (
+        <MissionPanel mission={task.mission} />
       ) : null}
 
       {/*
