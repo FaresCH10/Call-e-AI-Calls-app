@@ -634,6 +634,8 @@ select {
   font-size: var(--text-2xl);
   font-weight: 600;
   letter-spacing: -0.02em;
+  /* Headings set their own leading; the body's 1.6 belongs to running text. */
+  line-height: 1.18;
   margin: 0 0 var(--space-sm);
 }
 
@@ -2538,4 +2540,183 @@ label.business-result-row {
   .mission-pip {
     transition: none;
   }
+}
+
+/* ------------------------------------------ deleting a recent task ---- */
+
+/*
+ * The row becomes a flex container so the trash button can sit at its end
+ * without the task name having to leave room for it when it is not shown.
+ */
+.recent-row {
+  display: flex;
+  align-items: center;
+}
+
+.recent-row .recent-item {
+  flex: 1;
+  min-width: 0;
+}
+
+/*
+ * Hidden until the row is hovered or something in it has keyboard focus.
+ *
+ * Twelve always-visible bins turn a quiet list into a row of warnings, and the
+ * common action here is opening a task, not deleting one. `visibility` rather
+ * than `display` so the button keeps its place and the name does not reflow
+ * under the pointer as it arrives.
+ */
+.recent-delete {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  margin-right: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  visibility: hidden;
+  transition:
+    color var(--motion-fast) var(--easing),
+    background var(--motion-fast) var(--easing);
+}
+
+.recent-row:hover .recent-delete,
+.recent-row:focus-within .recent-delete {
+  visibility: visible;
+}
+
+.recent-delete:hover {
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+}
+
+.recent-delete:focus-visible {
+  visibility: visible;
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/*
+ * Touch has no hover, so a bin that only appears on hover is a bin that never
+ * appears. Shown permanently there, and given a full-size target.
+ */
+@media (hover: none) {
+  .recent-delete {
+    visibility: visible;
+    width: 44px;
+    height: 44px;
+  }
+}
+
+/* The confirm replaces the row: at sidebar width there is no room for both. */
+.recent-confirm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px var(--space-md) 6px 34px;
+  border-radius: var(--radius-md);
+  background: var(--color-danger-soft);
+}
+
+.recent-confirm-text {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.recent-confirm-yes,
+.recent-confirm-no {
+  flex: none;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity var(--motion-fast) var(--easing);
+}
+
+/*
+ * Outlined rather than filled, following the danger buttons elsewhere.
+ * `--color-danger` inverts to a pale red in dark mode, so a filled version
+ * would need white text on #fca5a5 -- about 2:1, and unreadable.
+ */
+.recent-confirm-yes {
+  background: transparent;
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.recent-confirm-yes:hover:not(:disabled) {
+  background: var(--color-danger-soft);
+}
+
+.recent-confirm-no {
+  background: transparent;
+  border-color: var(--color-border);
+  color: var(--color-text-secondary);
+}
+
+.recent-confirm-yes:disabled,
+.recent-confirm-no:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.recent-confirm-yes:focus-visible,
+.recent-confirm-no:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.recent-error {
+  margin: 6px var(--space-md) 0 34px;
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  color: var(--color-danger);
+}
+
+/* ------------------------------------------ the request, at its size ---- */
+
+/*
+ * A task's own words, sized to how many of them there are.
+ *
+ * This began as a plain `.page-title`: 30px inheriting the body's 1.6
+ * line-height, which is 48px of leading. On a one-line title nobody noticed.
+ * On a five-line request it produced a wall of display type that pushed the
+ * status, the timer and the result panel off the first screen -- the heading
+ * was louder than the answer it was introducing.
+ */
+.task-instruction {
+  text-wrap: balance;
+}
+
+/*
+ * Past a sentence or so, this stops being a title and starts being a
+ * paragraph, so it is set like one: smaller, looser, and held to a readable
+ * measure instead of running the full width of the panel.
+ */
+.task-instruction[data-length='medium'] {
+  font-size: var(--text-xl);
+  line-height: 1.3;
+  max-width: 34ch;
+}
+
+.task-instruction[data-length='long'] {
+  font-size: var(--text-lg);
+  font-weight: 500;
+  line-height: 1.45;
+  letter-spacing: -0.01em;
+  /* `balance` is for two to four lines; past that it does nothing useful. */
+  text-wrap: pretty;
+  max-width: 58ch;
 }

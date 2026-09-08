@@ -60,6 +60,25 @@ function toneStyle(tone: string): React.CSSProperties {
 /** How many of the businesses found are shown before "Show more". */
 const CANDIDATE_PREVIEW = 5;
 
+/**
+ * How much display weight a request can carry.
+ *
+ * The instruction is whatever the person typed, and that ranges from "Find a
+ * plumber" to a five-sentence brief naming four things to ask about. One type
+ * size cannot serve both: at 30px the short one is a proper page title, while
+ * the long one becomes a wall of display type that buries everything under it.
+ *
+ * So the size follows the length. Thresholds are in characters rather than
+ * lines because the line count depends on the viewport, and the heading would
+ * otherwise change size as the window resized.
+ */
+function instructionWeight(text: string): 'short' | 'medium' | 'long' {
+  const length = text.trim().length;
+  if (length <= 70) return 'short';
+  if (length <= 160) return 'medium';
+  return 'long';
+}
+
 export function TaskView({ initial }: { initial: TaskDetail }) {
   const [task, setTask] = useState<TaskDetail>(initial);
   const [busy, setBusy] = useState(false);
@@ -188,7 +207,11 @@ export function TaskView({ initial }: { initial: TaskDetail }) {
             running={Boolean(task.activeSince)}
           />
         </div>
-        <h1 className="page-title" style={{ marginTop: 12 }}>
+        <h1
+          className="page-title task-instruction"
+          data-length={instructionWeight(task.instruction)}
+          style={{ marginTop: 12 }}
+        >
           {task.instruction}
         </h1>
         {task.headline && task.headline !== task.instruction ? (

@@ -171,6 +171,17 @@ export function CheckIcon({ size = 18, className }: IconProps) {
   );
 }
 
+export function TrashIcon({ size = 16, className }: IconProps) {
+  return (
+    <svg {...base(size)} className={className}>
+      <path d="M4 7h16" />
+      <path d="M10 4h4a1 1 0 0 1 1 1v2H9V5a1 1 0 0 1 1-1Z" />
+      <path d="M6 7v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7" />
+      <path d="M10 11v6M14 11v6" />
+    </svg>
+  );
+}
+
 export function MapPinIcon({ size = 16, className }: IconProps) {
   return (
     <svg {...base(size)} className={className}>

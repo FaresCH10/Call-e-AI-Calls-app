@@ -143,7 +143,14 @@ export default function TaskScreen() {
             : ''}
         </Notice>
       ) : null}
-      <Text style={styles.instruction}>{task.instruction}</Text>
+      {/*
+        Sized to how much was typed. A short request is a title; a five-sentence
+        brief is a paragraph, and setting the second one at title size buries
+        everything below it.
+      */}
+      <Text style={[styles.instruction, instructionStyle(task.instruction)]}>
+        {task.instruction}
+      </Text>
       {task.headline ? <Text style={styles.headline}>{task.headline}</Text> : null}
 
       {task.clarifyingQuestions.length > 0 ? (
@@ -516,9 +523,23 @@ function formatOffset(seconds: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+/**
+ * The request's type size, following its length.
+ *
+ * Matches the web app's thresholds exactly so the same task does not look like
+ * two different things on the two platforms. Counted in characters rather than
+ * lines, because the line count depends on the screen.
+ */
+function instructionStyle(instruction: string) {
+  const length = instruction.trim().length;
+  if (length <= 70) return null;
+  if (length <= 160) return { fontSize: text.lg, lineHeight: 25 };
+  return { fontSize: text.md, fontWeight: '500' as const, lineHeight: 23 };
+}
+
 const styles = StyleSheet.create({
   centre: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
-  instruction: { fontSize: text.xl, fontWeight: '600', color: colors.textPrimary },
+  instruction: { fontSize: text.xl, fontWeight: '600', color: colors.textPrimary, lineHeight: 28 },
   headline: { fontSize: text.base, color: colors.textSecondary },
   resultName: { fontSize: text.xl, fontWeight: '600', color: colors.textPrimary },
   resultPrice: { fontSize: text.xxl, fontWeight: '600', color: colors.textPrimary },
