@@ -129,8 +129,8 @@ function scriptedProvider(options: {
 
 /* ------------------------------------------------------------ setup util */
 
-async function setupBusiness(provider: CallProvider) {
-  h = await createHarness({ provider });
+async function setupBusiness(provider: CallProvider, env: Record<string, string> = {}) {
+  h = await createHarness({ provider, env });
   const { token } = await signUp(h);
   const business = await h.app.inject({
     method: 'POST',
@@ -644,7 +644,18 @@ describe('results and aggregation', () => {
         completedAt: null,
       },
     });
-    const { token, businessId, workflowId, contactId } = await setupBusiness(provider);
+    /*
+     * The poll job must still be *pending* when this test deletes it below.
+     * With the harness default of a 1ms poll delay, `drain()` can claim and
+     * run it on a slow enough machine -- the scripted `get()` then completes
+     * the recipient before the webhook arrives, and the assertion fails. A
+     * developer's own .env setting CALL_POLL_DELAY_MS=5000 hid this locally
+     * while every fresh clone tripped on it. Pinning the delay here makes the
+     * test's assumption explicit instead of environmental.
+     */
+    const { token, businessId, workflowId, contactId } = await setupBusiness(provider, {
+      CALL_POLL_DELAY_MS: '60000',
+    });
 
     const run = await createRun(token, businessId, workflowId, [contactId]);
     const runId = (run.json() as { run: { id: string } }).run.id;
